@@ -10,7 +10,7 @@ import { join } from "node:path";
 
 const root = join(import.meta.dirname, "..");
 const dry = process.argv.includes("--dry-run");
-const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
+const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, stdio: "inherit", shell: cmd === "npm" && process.platform === "win32" });
 const { id, version, name } = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
 const repo = `atzski/${id}`;
 if (!process.env.NOTES) throw new Error("NOTES requis (notes de version affichées dans iBox).");
