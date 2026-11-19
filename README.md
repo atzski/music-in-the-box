@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.png" width="160" alt="Logo Music in the Box"></p>
+
 # Music in the Box
 
 Plugin iBox : contrôlez YouTube Music, ou n'importe quel lecteur Windows, par-dessus vos parties, au clavier (Alt+C par défaut) ou à la manette (Vue + Y).
