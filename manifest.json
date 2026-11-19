@@ -1,0 +1,12 @@
+{
+  "id": "music-in-the-box",
+  "name": "Music in the Box",
+  "version": "1.0.0",
+  "author": { "name": "atzski", "username": "atzski" },
+  "description": "Contrôlez YouTube Music ou votre lecteur par-dessus vos parties.",
+  "ibox": ">=0.1.107",
+  "platforms": ["windows"],
+  "permissions": ["overlay", "hotkey", "gamepad", "media-session", "backdrop", "webview:https://music.youtube.com"],
+  "overlay": { "builtin": "music", "side": "right", "width": 540, "hotkey": "Alt+C", "padCombo": ["back", "y"] },
+  "webview": { "url": "https://music.youtube.com/", "scripts": ["bridge/parse.js", "bridge/bridge.js"] }
+}
