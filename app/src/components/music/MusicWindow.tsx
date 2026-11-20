@@ -518,6 +518,28 @@ function ReportLayout({ card, stayOpen }: { card: RefObject<HTMLElement | null>;
  * elle-même de la capture), relue quatre fois par seconde et recalée à chaque image sur
  * la position de la carte, qui bouge pendant les animations.
  */
+/**
+ * Floute la capture (déjà réduite par le natif) une fois, dans un petit canevas. Un flou CSS
+ * sur une image plein écran est dessiné en tuiles par Chromium et laisse des raccords
+ * (une barre horizontale dans le verre) ; il coûte aussi bien plus à la carte graphique.
+ */
+async function preBlur(img: HTMLImageElement): Promise<string> {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("canevas indisponible");
+  // marge débordante : les bords ne s'assombrissent pas sous le flou
+  const m = 16;
+  ctx.filter = "blur(7px)";
+  ctx.drawImage(img, -m, -m, w + 2 * m, h + 2 * m);
+  const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/jpeg", 0.85));
+  if (!blob) throw new Error("flou impossible");
+  return URL.createObjectURL(blob);
+}
+
 /** Fondu entre deux images du fond (ms) : le jeu bouge derrière le verre sans à-coups. */
 const GLASS_FADE = 450;
 
@@ -538,10 +560,11 @@ function Glass({ card, tint }: { card: RefObject<HTMLElement | null>; tint: stri
       while (alive) {
         try {
           const bytes = await invoke<ArrayBuffer>("music_backdrop");
-          const next = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+          const raw = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
           const probe = new Image();
-          probe.src = next;
-          await probe.decode();
+          probe.src = raw;
+          await probe.decode().finally(() => URL.revokeObjectURL(raw));
+          const next = await preBlur(probe);
           if (!alive) {
             URL.revokeObjectURL(next);
             break;
@@ -578,7 +601,8 @@ function Glass({ card, tint }: { card: RefObject<HTMLElement | null>; tint: stri
             key={l.id}
             src={l.src}
             alt=""
-            className="absolute inset-0 h-full w-full max-w-none blur-2xl"
+            data-glass
+            className="absolute inset-0 h-full w-full max-w-none"
             style={i > 0 ? { animation: `glass-in ${GLASS_FADE}ms ease-out both` } : undefined}
           />
         ))}
