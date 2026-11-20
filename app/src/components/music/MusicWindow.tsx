@@ -1126,43 +1126,56 @@ function NowBar({ n, live, onToggle }: { n: NonNullable<MusicState["now"]>; live
  * S’il tient, il reste immobile (centré si demandé). Animations réduites : coupé avec « … ».
  */
 function Marquee({ text, className = "", center }: { text: string; className?: string; center?: boolean }) {
+  // Les mêmes éléments restent en place, qu'il défile ou non : la mesure suit toujours le
+  // vrai cadre (avant, passer d'un mode à l'autre laissait l'observateur sur un élément
+  // retiré, et le texte ne repartait plus).
   const box = useRef<HTMLDivElement>(null);
+  const track = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLSpanElement>(null);
   const [width, setWidth] = useState(0);
   useEffect(() => {
     const measure = () => {
       const b = box.current, i = inner.current;
       if (!b || !i) return;
-      const textW = Math.ceil(i.getBoundingClientRect().width);
+      // largeur de mise en page : le zoom d'ouverture de la carte (scale) ne la fausse pas
+      const textW = i.offsetWidth;
       setWidth(textW - b.clientWidth > 2 ? textW : 0);
     };
     measure();
     const ro = new ResizeObserver(measure);
     if (box.current) ro.observe(box.current);
+    if (inner.current) ro.observe(inner.current);
+    // la police (Cal Sans) peut arriver après la première mesure
+    document.fonts?.ready.then(measure).catch(() => {});
     return () => ro.disconnect();
   }, [text]);
   const GAP = 44;
   const scroll = width > 0 && !reduced();
-  if (!scroll)
-    return (
-      <div ref={box} className={`truncate ${center ? "text-center" : ""} ${className}`}>
-        <span ref={inner} className="whitespace-nowrap">{text}</span>
-      </div>
+  // Animation du navigateur, en boucle sans fin : elle ne dépend pas des rendus de React.
+  useEffect(() => {
+    const el = track.current;
+    if (!scroll || !el) return;
+    const d = width + GAP;
+    const pause = 1600;
+    const total = (d / 38) * 1000 + pause; // vitesse de lecture : environ 38 px/s
+    const a = el.animate(
+      [{ transform: "translateX(0)" }, { transform: "translateX(0)", offset: pause / total }, { transform: `translateX(${-d}px)` }],
+      { duration: total, iterations: Infinity, easing: "linear" },
     );
-  const run = (width + GAP) / 38; // vitesse de lecture : environ 38 px/s
-  const pause = 1.6;
+    return () => a.cancel();
+  }, [scroll, width, text]);
   const fade = "linear-gradient(90deg, transparent, #000 9%, #000 91%, transparent)";
   return (
-    <div ref={box} className={`relative overflow-hidden whitespace-nowrap ${className}`} style={{ maskImage: fade, WebkitMaskImage: fade }} title={text}>
-      <motion.div
-        key={text}
-        className="inline-flex pl-[9%]"
-        animate={{ x: [0, 0, -(width + GAP)] }}
-        transition={{ duration: run + pause, times: [0, pause / (run + pause), 1], ease: "linear", repeat: Infinity }}
-      >
+    <div
+      ref={box}
+      className={`relative overflow-hidden whitespace-nowrap ${scroll ? "" : `text-ellipsis ${center ? "text-center" : ""}`} ${className}`}
+      style={scroll ? { maskImage: fade, WebkitMaskImage: fade } : undefined}
+      title={scroll ? text : undefined}
+    >
+      <div ref={track} className={scroll ? "inline-flex pl-[9%]" : "inline"}>
         <span ref={inner}>{text}</span>
-        <span aria-hidden="true" style={{ paddingLeft: GAP }}>{text}</span>
-      </motion.div>
+        {scroll && <span aria-hidden="true" style={{ paddingLeft: GAP }}>{text}</span>}
+      </div>
     </div>
   );
 }
