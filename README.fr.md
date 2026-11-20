@@ -18,7 +18,7 @@ Windows 10 et 11 · Gratuit et open source · Un plugin pour <a href="https://gi
 
 <br>
 
-<img src="docs/media/hero.webp" width="100%" alt="Le panneau Music in the Box ouvert à droite de l'écran, par-dessus une ville de nuit dans Cyberpunk 2077 : pochette, titre, barre de progression, commandes de lecture et volume">
+<img src="docs/media/hero.webp" width="100%" alt="Le panneau Music in the Box qui s'ouvre par-dessus une ville de nuit dans Cyberpunk 2077, puis passe au titre suivant : pochette, titre, barre de progression, commandes de lecture et volume">
 
 </div>
 

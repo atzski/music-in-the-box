@@ -18,7 +18,7 @@ Windows 10 and 11 · Free and open source · A plugin for <a href="https://githu
 
 <br>
 
-<img src="docs/media/hero.webp" width="100%" alt="The Music in the Box panel open on the right side of the screen, on top of a night city in Cyberpunk 2077: cover, title, progress bar, playback controls and volume">
+<img src="docs/media/hero.webp" width="100%" alt="The Music in the Box panel opening on top of a night city in Cyberpunk 2077, then skipping to the next song: cover, title, progress bar, playback controls and volume">
 
 </div>
 
