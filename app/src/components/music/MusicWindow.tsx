@@ -594,7 +594,7 @@ function Glass({ card, tint }: { card: RefObject<HTMLElement | null>; tint: stri
   });
 
   return (
-    <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-[inherit]">
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-clip rounded-[inherit]">
       <div ref={img} className="absolute top-0 left-0 h-screen w-screen">
         {layers.map((l, i) => (
           <img
