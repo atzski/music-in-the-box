@@ -60,6 +60,23 @@ Avant l'installation, iBox affiche exactement ce que le plugin pourra faire :
 
 Chaque paquet est signé par son éditeur, et iBox vérifie la signature avant toute installation. Un plugin désactivé ne réserve aucun raccourci et n'ouvre aucune fenêtre.
 
+## Sans iBox : l'app autonome
+
+Vous n'utilisez pas iBox ? Music in the Box existe aussi en petite app Windows à part entière : le même panneau, le même pont YouTube Music, rien d'autre autour.
+
+1. Téléchargez `Music.in.the.Box_<version>_x64-setup.exe` dans la [dernière version](https://github.com/atzski/music-in-the-box/releases/latest) et lancez-le (pas besoin des droits administrateur).
+2. L'app attend dans la zone de notification. **Alt+C**, ou **Vue + Y** maintenus sur une manette, ouvre le panneau par-dessus le jeu ; la même chose le referme.
+3. Un clic sur l'icône ouvre les réglages : raccourci, place du panneau à l'écran, rester affiché pendant le jeu, connexion à YouTube Music, démarrage avec Windows.
+
+Sans compte YouTube Music, le panneau pilote le lecteur connu de Windows (Spotify, un navigateur, Deezer…). Si iBox tourne en même temps avec le plugin, les deux veulent Alt+C : choisissez un autre raccourci dans l'un des deux.
+
+|  | Plugin iBox | App autonome |
+|---|---|---|
+| Installation | iBox › Paramètres › Plugins | Installeur des Releases |
+| S'ouvre avec | Alt+C, Vue + Y | Alt+C, Vue + Y |
+| Vit dans | iBox | La zone de notification |
+| Corrections YouTube | Nouvelle version du plugin, installée par iBox | Nouvelle version de l'app |
+
 ## Comment c'est fait
 
 Le lecteur lui-même est intégré à iBox. Ce dépôt contient la partie qui change avec YouTube : le pont injecté dans music.youtube.com. Quand YouTube modifie ses pages, une nouvelle version du plugin corrige le pont, sans nouvelle version d'iBox.
@@ -69,11 +86,21 @@ Le lecteur lui-même est intégré à iBox. Ce dépôt contient la partie qui ch
 | `bridge/` | Le pont : `parse.js` lit les réponses de YouTube Music (testé), `bridge.js` pilote le lecteur |
 | `test/` | Tests Vitest, avec des réponses YouTube Music enregistrées (`fixtures/`) |
 | `manifest.json` | Identité, permissions, panneau et WebView |
+| `app/` | L'app autonome : interface (React 19) dans `app/src`, côté natif (Tauri 2, Rust) dans `app/src-tauri` ; l'essentiel vient d'iBox |
 
 ```
 npm install
 npm test
 npm run pack      # paquet signé dans dist/ (la clé d'éditeur n'est jamais dans ce dépôt)
+```
+
+L'app autonome se construit avec Node, Rust et WebView2 :
+
+```
+cd app
+npm install
+npm test
+npx tauri build   # installeur dans app/src-tauri/target/release/bundle/nsis/
 ```
 
 Pour essayer un paquet sans le publier : un catalogue local désigné par `IBOX_PLUGINS_CATALOG` au lancement d'iBox (voir `docs/PLUGINS.md` d'iBox).

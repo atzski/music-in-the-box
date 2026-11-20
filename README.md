@@ -60,6 +60,23 @@ Before installing, iBox lists exactly what the plugin is allowed to do:
 
 Every package is signed by its publisher, and iBox checks the signature before installing anything. A disabled plugin reserves no shortcut and opens no window.
 
+## Without iBox: the standalone app
+
+Don't use iBox? Music in the Box also exists as a small Windows app of its own: the same panel, the same YouTube Music bridge, nothing else around it.
+
+1. Download `Music.in.the.Box_<version>_x64-setup.exe` from the [latest release](https://github.com/atzski/music-in-the-box/releases/latest) and run it (no administrator rights needed).
+2. The app waits in the notification area. **Alt+C**, or **View + Y** held on a controller, opens the panel over your game; the same again closes it.
+3. Click the tray icon for the settings: shortcut, where the panel sits on screen, staying visible while you play, YouTube Music sign-in, start with Windows.
+
+Without a YouTube Music account, the panel drives whatever player Windows knows about (Spotify, a browser, Deezer…). If iBox runs with the plugin at the same time, both want Alt+C: pick another shortcut in one of them.
+
+|  | iBox plugin | Standalone app |
+|---|---|---|
+| Install | iBox › Settings › Plugins | Installer from the Releases |
+| Opens with | Alt+C, View + Y | Alt+C, View + Y |
+| Lives in | iBox | The notification area |
+| YouTube fixes | New plugin version, installed by iBox | New app version |
+
 ## How it is built
 
 The player itself lives in iBox. This repository holds what changes with YouTube: the bridge injected into music.youtube.com. When YouTube changes its pages, a new plugin version fixes it, without a new iBox release.
@@ -69,11 +86,21 @@ The player itself lives in iBox. This repository holds what changes with YouTube
 | `bridge/` | The bridge: `parse.js` reads YouTube Music's answers (tested), `bridge.js` drives the player |
 | `test/` | Vitest tests, with recorded YouTube Music answers (`fixtures/`) |
 | `manifest.json` | Identity, permissions, panel and web view |
+| `app/` | The standalone app: interface (React 19) in `app/src`, native side (Tauri 2, Rust) in `app/src-tauri`; most of it comes from iBox |
 
 ```
 npm install
 npm test
 npm run pack      # signed package in dist/ (the publisher key never lives in this repository)
+```
+
+The standalone app builds with Node, Rust and WebView2:
+
+```
+cd app
+npm install
+npm test
+npx tauri build   # installer in app/src-tauri/target/release/bundle/nsis/
 ```
 
 To try a package without publishing it, point iBox to a local catalog with `IBOX_PLUGINS_CATALOG` (see `docs/PLUGINS.md` in iBox).

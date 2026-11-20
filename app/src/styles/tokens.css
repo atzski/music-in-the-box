@@ -1,0 +1,143 @@
+/*
+ * iBox — tokens graphiques.
+ * Source unique de vérité pour les couleurs, espacements, rayons, ombres et mouvements.
+ * Les valeurs sont exposées en variables CSS (thèmes dynamiques par console)
+ * puis mappées vers Tailwind via @theme dans global.css.
+ */
+:root {
+  /*
+   * Chaque couleur est déclarée via light-dark(clair, sombre) : le thème suit
+   * `color-scheme` (posé sur <html> selon le réglage Système / Clair / Sombre).
+   * Le mode sombre est une « nuit douce » bleu-violet, jamais un noir pur.
+   */
+  color-scheme: light;
+
+  /* — Palette de base — */
+  --ibox-cream: light-dark(#f8f7f3, #161a25);
+  --ibox-cream-deep: light-dark(#f1efe8, #1f2433);
+  /* teinte du thème (palette d'iBox) : colore légèrement surfaces et filets */
+  --ibox-tint: var(--ibox-sky);
+  /* surface de nuit propre au thème (redéfinie par chaque palette) */
+  --ibox-night: #252b3b;
+  /* « blanc » = surface des cartes (Tailwind bg-white y est relié), teintée par le thème */
+  --ibox-white: light-dark(color-mix(in srgb, var(--ibox-tint) 6%, #ffffff), color-mix(in srgb, var(--ibox-tint) 9%, var(--ibox-night)));
+  --ibox-sky: #8ccdf1;
+  --ibox-sky-soft: light-dark(#ddf1fc, #1d3346);
+  --ibox-sky-deep: light-dark(#2f7fb0, #9ed8f7);
+  --ibox-lavender: #b9a6e8;
+  --ibox-lavender-soft: light-dark(#eee9fb, #2a2544);
+  --ibox-lavender-deep: light-dark(#6a54b4, #c9b9f2);
+  --ibox-mint: #a9dfc8;
+  --ibox-mint-soft: light-dark(#e6f6ef, #1c3530);
+  --ibox-mint-deep: light-dark(#2f7d5e, #7fd1ad);
+  --ibox-peach: #f5c4ac;
+  --ibox-peach-soft: light-dark(#fdeee6, #3a2a28);
+  --ibox-peach-deep: light-dark(#b25d3a, #f6c7b1);
+
+  /* Texte : contraste AA dans les deux thèmes */
+  --ibox-ink: light-dark(#344459, #e8ecf5); /* 9.4:1 / 13:1 */
+  --ibox-ink-soft: light-dark(#637184, #a7b0c3); /* 4.6:1 / 7.5:1 */
+  --ibox-ink-faint: light-dark(#8794a3, #7c869a); /* décoratif uniquement */
+  --ibox-line: light-dark(color-mix(in srgb, var(--ibox-tint) 22%, rgba(52, 68, 89, 0.08)), color-mix(in srgb, var(--ibox-tint) 18%, rgba(232, 236, 245, 0.08)));
+  --ibox-dots: light-dark(rgba(52, 68, 89, 0.07), rgba(232, 236, 245, 0.05));
+  /* Texte toujours clair, posé sur un fond d'accent saturé */
+  --ibox-on-accent: #ffffff;
+
+  /* — Accent dynamique (surchargé par le thème de console actif, voir platformTheme.ts) — */
+  --accent: var(--ibox-sky);
+  --accent-soft: var(--ibox-sky-soft);
+  /* fond saturé (boutons principaux) */
+  --accent-deep: #2f7fb0;
+  /* texte d'accent lisible sur le fond courant */
+  --accent-text: var(--ibox-sky-deep);
+  --accent-glow: rgba(140, 205, 241, 0.55);
+
+  /*
+   * — Couleurs d'action (code couleur commun à toute l'app) —
+   * solid : fond plein (texte --tone-on, contraste ≥ 4,5:1) ;
+   * ink : texte ou icône colorés lisibles sur une surface claire OU sombre.
+   * bleu = ouvrir / naviguer · vert = jouer, valider, social · jaune = favoris, mise en avant
+   * orange = réglages, corriger · rouge = supprimer, quitter · violet = collections, personnaliser
+   * rose = images, médias · turquoise = versions, sauvegardes, système
+   */
+  /*
+   * Les couleurs d'action se fondent dans la palette choisie (thèmes d'iBox) :
+   * --theme-blend dose le mélange avec l'accent du thème (doux par défaut,
+   * plus marqué pour les thèmes volontairement vifs) ; rouge, vert et jaune
+   * gardent leur sens et ne se mélangent qu'à moitié (--theme-blend-soft).
+   */
+  --theme-blend: 26%;
+  --theme-blend-soft: 12%;
+  /* voile clair des tuiles en verre (tuile iBox Platforms) */
+  --theme-veil: 24%;
+  --theme-deep: var(--accent-deep);
+  --theme-light: color-mix(in srgb, var(--accent) 65%, #ffffff);
+  --tone-blue: color-mix(in oklch, #1e6fd9, var(--theme-deep) var(--theme-blend));
+  --tone-blue-ink: light-dark(color-mix(in oklch, #1b5fb8, var(--theme-deep) var(--theme-blend)), color-mix(in oklch, #8cc0ff, var(--theme-light) var(--theme-blend)));
+  --tone-green: color-mix(in oklch, #1b7f47, var(--theme-deep) var(--theme-blend-soft));
+  --tone-green-ink: light-dark(color-mix(in oklch, #1a7444, var(--theme-deep) var(--theme-blend-soft)), color-mix(in oklch, #7fdca6, var(--theme-light) var(--theme-blend-soft)));
+  --tone-yellow: color-mix(in oklch, #f2b200, var(--theme-light) var(--theme-blend-soft));
+  --tone-yellow-ink: light-dark(color-mix(in oklch, #8a5a00, var(--theme-deep) var(--theme-blend-soft)), color-mix(in oklch, #ffd36b, var(--theme-light) var(--theme-blend-soft)));
+  --tone-orange: color-mix(in oklch, #c2540a, var(--theme-deep) var(--theme-blend));
+  --tone-orange-ink: light-dark(color-mix(in oklch, #a84a0a, var(--theme-deep) var(--theme-blend)), color-mix(in oklch, #ffb27a, var(--theme-light) var(--theme-blend)));
+  --tone-red: color-mix(in oklch, #d63a3a, var(--theme-deep) var(--theme-blend-soft));
+  --tone-red-ink: light-dark(color-mix(in oklch, #b42a2a, var(--theme-deep) var(--theme-blend-soft)), color-mix(in oklch, #ff9a94, var(--theme-light) var(--theme-blend-soft)));
+  --tone-pink: color-mix(in oklch, #d13a82, var(--theme-deep) var(--theme-blend));
+  --tone-pink-ink: light-dark(color-mix(in oklch, #a82466, var(--theme-deep) var(--theme-blend)), color-mix(in oklch, #ff9ccb, var(--theme-light) var(--theme-blend)));
+  --tone-purple: color-mix(in oklch, #7a4bdb, var(--theme-deep) var(--theme-blend));
+  --tone-purple-ink: light-dark(color-mix(in oklch, #6236c4, var(--theme-deep) var(--theme-blend)), color-mix(in oklch, #c4a8ff, var(--theme-light) var(--theme-blend)));
+  --tone-teal: color-mix(in oklch, #0c7c81, var(--theme-deep) var(--theme-blend));
+  --tone-teal-ink: light-dark(color-mix(in oklch, #0b6e72, var(--theme-deep) var(--theme-blend)), color-mix(in oklch, #74dcdc, var(--theme-light) var(--theme-blend)));
+
+  /* décor de couleurs derrière l'interface (chaque palette a le sien) */
+  --ibox-backdrop: radial-gradient(60% 55% at 0% 0%, color-mix(in srgb, var(--ibox-sky) 38%, transparent), transparent 70%),
+    radial-gradient(55% 60% at 100% 10%, color-mix(in srgb, var(--ibox-lavender) 34%, transparent), transparent 70%),
+    radial-gradient(60% 55% at 85% 100%, color-mix(in srgb, var(--ibox-peach) 34%, transparent), transparent 70%),
+    radial-gradient(50% 50% at 10% 95%, color-mix(in srgb, var(--ibox-mint) 34%, transparent), transparent 70%);
+
+  /* — Espacements (base 4 px, en rem pour suivre l'échelle TV) — */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+  --space-9: 6rem;
+
+  /* — Rayons généreux — */
+  --radius-sm: 0.75rem;
+  --radius-md: 1.25rem;
+  --radius-lg: 1.75rem;
+  --radius-xl: 2.25rem;
+  --radius-pill: 999px;
+
+  /* — Ombres douces teintées d'encre — */
+  --shadow-xs: 0 1px 2px light-dark(rgba(52, 68, 89, 0.06), rgba(0, 0, 0, 0.3));
+  --shadow-sm: 0 2px 6px light-dark(rgba(52, 68, 89, 0.06), rgba(0, 0, 0, 0.25)),
+    0 8px 18px -6px light-dark(rgba(52, 68, 89, 0.1), rgba(0, 0, 0, 0.35));
+  --shadow-md: 0 4px 10px light-dark(rgba(52, 68, 89, 0.05), rgba(0, 0, 0, 0.25)),
+    0 18px 40px -12px light-dark(rgba(52, 68, 89, 0.18), rgba(0, 0, 0, 0.5));
+  --shadow-lg: 0 8px 20px light-dark(rgba(52, 68, 89, 0.06), rgba(0, 0, 0, 0.3)),
+    0 34px 70px -20px light-dark(rgba(52, 68, 89, 0.26), rgba(0, 0, 0, 0.6));
+  --shadow-inset: inset 0 1px 0 light-dark(rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.06));
+
+  /* — Typographie — */
+  --font-display: "Cal Sans", "Nunito Variable", system-ui, sans-serif;
+  --font-body: "Cal Sans", "Nunito Variable", system-ui, sans-serif;
+
+  /* — Mouvement — */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast: 160ms;
+  --dur-base: 260ms;
+  --dur-slow: 480ms;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+html[data-theme="system"] {
+  color-scheme: light dark;
+}

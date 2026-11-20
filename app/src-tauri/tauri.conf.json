@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Music in the Box",
+  "version": "1.1.0",
+  "identifier": "com.atzski.musicinthebox",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1430",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: https://*.ytimg.com https://*.googleusercontent.com https://*.ggpht.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; media-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "publisher": "atzski",
+    "copyright": "© 2026 atzski",
+    "category": "Music",
+    "shortDescription": "YouTube Music ou votre lecteur, par-dessus vos jeux",
+    "longDescription": "Music in the Box ouvre un mini-lecteur par-dessus vos jeux (Alt+C ou Vue + Y sur la manette) : YouTube Music, ou tout lecteur déclaré à Windows (Spotify, navigateur…).",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "languages": ["French", "English"],
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "startMenuFolder": "Music in the Box"
+      }
+    }
+  }
+}
