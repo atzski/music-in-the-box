@@ -249,6 +249,20 @@
       return P.playlists(await innertube('browse', { browseId: 'FEmusic_liked_playlists' }));
     },
     playlist: function (a) { return playlistTracks(String((a && a.id) || '')); },
+    // une page à la fois : {id} pour la première, puis {next} rendu par la page précédente.
+    // L'interface affiche la première page aussitôt et complète la suite pendant qu'on lit.
+    playlistPage: async function (a) {
+      var next = a && a.next;
+      if (!next) {
+        var id = String((a && a.id) || '');
+        if (!/^VL/.test(id)) id = 'VL' + id;
+        return P.playlistPage(await innertube('browse', { browseId: id }));
+      }
+      var json = next.legacy
+        ? await innertube('browse', {}, '&ctoken=' + encodeURIComponent(next.token) + '&continuation=' + encodeURIComponent(next.token) + '&type=next')
+        : await innertube('browse', { continuation: next.token });
+      return P.playlistPage(json);
+    },
     // file d'attente du titre en cours (titres suivants de la playlist ou de la radio)
     queue: async function () {
       var p = needPlayer(), d = p.getVideoData ? p.getVideoData() : {};
