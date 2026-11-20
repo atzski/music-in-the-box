@@ -10,6 +10,8 @@ Pilotez YouTube Music, ou n'importe quel lecteur de musique Windows, sans quitte
 
 <a href="https://github.com/atzski/ibox/releases/latest"><strong>Télécharger iBox</strong></a> · puis <strong>Paramètres › Plugins › Music in the Box</strong>
 
+<sub>Pas d'iBox ? <a href="https://github.com/atzski/music-in-the-box/releases/latest">Téléchargez l'app autonome</a> pour Windows.</sub>
+
 Windows 10 et 11 · Gratuit et open source · Un plugin pour <a href="https://github.com/atzski/ibox">iBox</a>
 
 <sub><a href="README.md">English</a> · Français</sub>

@@ -10,6 +10,8 @@ Control YouTube Music, or any music player on Windows, without leaving your game
 
 <a href="https://github.com/atzski/ibox/releases/latest"><strong>Get iBox</strong></a> · then <strong>Settings › Plugins › Music in the Box</strong>
 
+<sub>No iBox? <a href="https://github.com/atzski/music-in-the-box/releases/latest">Download the standalone app</a> for Windows.</sub>
+
 Windows 10 and 11 · Free and open source · A plugin for <a href="https://github.com/atzski/ibox">iBox</a>
 
 <sub>English · <a href="README.fr.md">Français</a></sub>
