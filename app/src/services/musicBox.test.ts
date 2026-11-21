@@ -116,6 +116,33 @@ describe("démarrage rapide, paroles et déplacement", () => {
     expect(lyricsProgress(50_000, 0)).toBe(0);
   });
 
+  it("trouve la ligne chantée à un instant donné", async () => {
+    const { lyricsLineAt } = await import("./musicBox");
+    const times = [5000, 8000, 12000, 12000, 20000];
+    // introduction : aucune ligne
+    expect(lyricsLineAt(times, 0, 0)).toBe(-1);
+    expect(lyricsLineAt(times, 4999, 0)).toBe(-1);
+    expect(lyricsLineAt(times, 5000, 0)).toBe(0);
+    expect(lyricsLineAt(times, 9000, 0)).toBe(1);
+    // deux lignes au même instant : la seconde
+    expect(lyricsLineAt(times, 12000, 0)).toBe(3);
+    expect(lyricsLineAt(times, 999_999, 0)).toBe(4);
+    // l'avance : la ligne s'allume un court instant avant d'être chantée
+    expect(lyricsLineAt(times, 7900)).toBe(1);
+    expect(lyricsLineAt([], 1000)).toBe(-1);
+  });
+
+  it("ne se fie aux horaires que s'il y en a un par ligne, dans l'ordre", async () => {
+    const { lyricsSynced } = await import("./musicBox");
+    const lines = ["a", "b", "c"];
+    expect(lyricsSynced({ lines, source: null, times: [0, 1000, 2000] })).toBe(true);
+    expect(lyricsSynced({ lines, source: null })).toBe(false);
+    expect(lyricsSynced({ lines, source: null, times: null })).toBe(false);
+    expect(lyricsSynced({ lines, source: null, times: [0, 1000] })).toBe(false);
+    expect(lyricsSynced({ lines, source: null, times: [0, 3000, 2000] })).toBe(false);
+    expect(lyricsSynced({ lines, source: null, times: [0, Number.NaN, 2000] })).toBe(false);
+  });
+
   it("déplace la lecture par pas de cinq secondes sans sortir du titre", async () => {
     const { seekBy } = await import("./musicBox");
     expect(seekBy(30_000, 1, 200_000)).toBe(35_000);

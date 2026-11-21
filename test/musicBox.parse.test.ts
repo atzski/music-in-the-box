@@ -204,6 +204,25 @@ describe("Music in the Box : réponses YouTube Music", () => {
     expect(P4.lyrics({ contents: { sectionListRenderer: { contents: [{ musicDescriptionShelfRenderer: { description: { runs: [{ text: "  " }] } } }] } } })).toBeNull();
   });
 
+  it("lit les paroles horodatées, et renonce dès qu'une ligne n'a pas d'horaire", () => {
+    const P5 = P as unknown as { timedLyrics: (j: unknown) => { lines: string[]; times: number[]; source: string | null } | null };
+    // forme réelle de la réponse faite à l'application mobile (novembre 2026) ; texte inventé
+    const page = (lines: object[]) => ({
+      contents: { elementRenderer: { newElement: { type: { componentType: { model: { timedLyricsModel: { lyricsData: { timedLyricsData: lines, sourceMessage: "Source : Exemple", staticLayout: false } } } } } } } },
+    });
+    const line = (text: string, start?: number) => ({ lyricLine: text, ...(start === undefined ? {} : { cueRange: { startTimeMilliseconds: String(start), endTimeMilliseconds: String(start + 2000), metadata: { id: "1" } } }) });
+    expect(P5.timedLyrics(page([line("♪", 0), line("Premier vers ", 5530), line("Deuxième vers", 8280)]))).toEqual({
+      lines: ["♪", "Premier vers", "Deuxième vers"],
+      times: [0, 5530, 8280],
+      source: "Source : Exemple",
+    });
+    // un clip : les lignes viennent sans horaire (`staticLayout`) → pas de synchronisation
+    expect(P5.timedLyrics(page([line("Premier vers"), line("Deuxième vers")]))).toBeNull();
+    expect(P5.timedLyrics(page([line("Premier vers", 1000), line("Deuxième vers")]))).toBeNull();
+    expect(P5.timedLyrics(page([]))).toBeNull();
+    expect(P5.timedLyrics({ contents: { messageRenderer: {} } })).toBeNull();
+  });
+
   // réponses réelles enregistrées : chaque titre a un identifiant, un titre et un artiste
   const fixtures = join(__dirname, "fixtures");
   const files = existsSync(fixtures) ? readdirSync(fixtures).filter((f) => f.endsWith(".json")) : [];

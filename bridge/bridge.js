@@ -7,7 +7,7 @@
 
   var P = ytmParse;
   var results = {};
-  var VERSION = 3;
+  var VERSION = 4;
   /** Pages lues au plus pour une playlist (environ 100 titres par page). */
   var MAX_PAGES = 10;
 
@@ -47,6 +47,21 @@
     var res = await fetch('/youtubei/v1/' + endpoint + '?prettyPrint=false' + (query || ''), {
       method: 'POST', credentials: 'include', headers: headers,
       body: JSON.stringify(Object.assign({ context: ctx }, body))
+    });
+    if (!res.ok) throw new Error('innertube-' + res.status);
+    return res.json();
+  }
+
+  // Paroles horodatées : YouTube Music ne donne l'instant de chaque ligne qu'à son application
+  // mobile. Même point d'entrée, autre client ; la demande est publique, envoyée sans cookies
+  // ni jeton (rien du compte ne part avec elle).
+  var APP_CLIENT = { clientName: 'ANDROID_MUSIC', clientVersion: '7.21.50' };
+  async function innertubeApp(endpoint, body) {
+    var web = (cfg('INNERTUBE_CONTEXT') || {}).client || {};
+    var res = await fetch('/youtubei/v1/' + endpoint + '?prettyPrint=false', {
+      method: 'POST', credentials: 'omit',
+      headers: { 'Content-Type': 'application/json', 'X-Youtube-Client-Name': '21', 'X-Youtube-Client-Version': APP_CLIENT.clientVersion },
+      body: JSON.stringify(Object.assign({ context: { client: Object.assign({ hl: web.hl, gl: web.gl }, APP_CLIENT) } }, body))
     });
     if (!res.ok) throw new Error('innertube-' + res.status);
     return res.json();
@@ -286,8 +301,9 @@
       if (list) body.playlistId = list;
       return P.queue(await innertube('next', body));
     },
-    // paroles d'un titre (celui en cours par défaut) : {lines, source}, ou null quand YouTube
-    // Music n'en a pas. Gardées par titre : rouvrir l'onglet ne relance aucune requête.
+    // paroles d'un titre (celui en cours par défaut) : {lines, source}, avec {times} (début de
+    // chaque ligne, en ms) quand elles sont synchronisées ; null quand YouTube Music n'en a
+    // pas. Gardées par titre : rouvrir l'onglet ne relance aucune requête.
     lyrics: async function (a) {
       var p = player();
       var id = String((a && a.videoId) || (p && p.getVideoData ? p.getVideoData().video_id : '') || '');
@@ -295,7 +311,12 @@
       if (id in lyricsCache) return lyricsCache[id];
       var page = id in lyricsPages ? lyricsPages[id] : P.lyricsId(await innertube('next', { videoId: id, isAudioOnly: true }));
       lyricsPages[id] = page;
-      var out = page ? P.lyrics(await innertube('browse', { browseId: page })) : null;
+      var out = null;
+      if (page) {
+        // d'abord les paroles horodatées ; à défaut (clip, refus, source sans horaires), le texte seul
+        try { out = P.timedLyrics(await innertubeApp('browse', { browseId: page })); } catch (e) { out = null; }
+        if (!out) out = P.lyrics(await innertube('browse', { browseId: page }));
+      }
       lyricsCache[id] = out;
       return out;
     },

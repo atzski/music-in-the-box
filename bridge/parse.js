@@ -272,5 +272,23 @@ var ytmParse = (function () {
     };
   }
 
-  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue, lyricsId: lyricsId, lyrics: lyrics };
+  // Paroles horodatées (réponse `browse` de la même page, demandée comme l'application
+  // mobile) : chaque ligne avec l'instant où elle commence, en millisecondes. null dès qu'une
+  // ligne n'a pas d'horaire (clip, source sans synchronisation) : on se rabat sur `lyrics`.
+  function timedLyrics(json) {
+    var data = find(json, 'timedLyricsData');
+    if (!Array.isArray(data) || !data.length) return null;
+    var lines = [], times = [];
+    for (var i = 0; i < data.length; i++) {
+      var cue = data[i] && data[i].cueRange;
+      var at = cue ? Number(cue.startTimeMilliseconds) : NaN;
+      if (!isFinite(at) || at < 0) return null;
+      lines.push(String(data[i].lyricLine || '').trim());
+      times.push(at);
+    }
+    var source = find(json, 'sourceMessage');
+    return { lines: lines, times: times, source: (typeof source === 'string' && source.trim()) || null };
+  }
+
+  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue, lyricsId: lyricsId, lyrics: lyrics, timedLyrics: timedLyrics };
 })();

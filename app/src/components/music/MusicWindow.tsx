@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKe
 import { animate, AnimatePresence, motion, useAnimationFrame, useMotionValue, useSpring, useTransform } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DEFAULT_POSITION, formatTime, loadPlaylist, lyricsProgress, music, parseLaunches, placeCard, positionAt, positionOf, pushLaunch, radioOf, seekBy, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type Launch, type Lyrics, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
+import { DEFAULT_POSITION, formatTime, loadPlaylist, lyricsLineAt, lyricsProgress, lyricsSynced, music, parseLaunches, placeCard, positionAt, positionOf, pushLaunch, radioOf, seekBy, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type Launch, type Lyrics, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
 import { sound } from "@/services/sound";
 import { Icon, type IconName } from "@/components/ui/Icon";
 import { PadKeyboard } from "@/components/shell/PadKeyboard";
@@ -576,7 +576,7 @@ export function MusicWindow() {
                               onRadio={youtube && n ? () => void play({ videoId: n.id, playlistId: radioOf(n.id) }) : undefined}
                             />
                           ) : view === "lyrics" ? (
-                            <LyricsView entry={youtube && n && lyrics?.id === n.id ? lyrics.entry : undefined} hasTrack={youtube && !!n} trackKey={n?.id ?? ""} durationMs={n?.durationMs ?? 0} live={live} />
+                            <LyricsView entry={youtube && n && lyrics?.id === n.id ? lyrics.entry : undefined} hasTrack={youtube && !!n} trackKey={n?.id ?? ""} durationMs={n?.durationMs ?? 0} live={live} onSeek={(ms) => void act("seek", ms)} />
                           ) : view === "search" ? (
                             album ? (
                               <AlbumDetail album={album} current={n} onPlay={play} />
@@ -1525,34 +1525,69 @@ function QueueList({ items, current, onPlay, onRadio }: { items: QueueItem[]; cu
 }
 
 /**
- * Paroles du titre en cours. Le texte suit doucement l'avancée du titre (un repère, pas un
- * karaoké : YouTube Music ne donne pas l'heure de chaque ligne) ; dès qu'on fait défiler
- * soi-même, à la molette, au clavier ou à la manette, le suivi attend quelques secondes.
+ * Paroles du titre en cours. Quand YouTube Music donne l'instant de chaque ligne, elles sont
+ * synchronisées : la ligne chantée grandit et s'éclaire, les autres s'estompent, et un clic
+ * sur une ligne y amène la lecture. Sinon (clips, certains titres), le texte défile à un
+ * rythme estimé. Dans les deux cas, dès qu'on fait défiler soi-même, le suivi attend.
  */
-function LyricsView({ entry, hasTrack, trackKey, durationMs, live }: { entry: LyricsEntry | undefined; hasTrack: boolean; trackKey: string; durationMs: number; live: () => number }) {
-  const box = useRef<HTMLDivElement>(null);
-  const hold = useRef(0);
-  const found = entry && typeof entry === "object" ? entry : null;
+function LyricsView({ entry, hasTrack, trackKey, durationMs, live, onSeek }: { entry: LyricsEntry | undefined; hasTrack: boolean; trackKey: string; durationMs: number; live: () => number; onSeek: (ms: number) => void }) {
+  if (!hasTrack) return <LyricsNote title="Aucun titre en cours" body="Lancez un titre sur YouTube Music : ses paroles s’afficheront ici." />;
+  if (entry === undefined) return <Loading />;
+  if (entry === "old") return <LyricsNote title="Paroles indisponibles" body="Mettez à jour le plugin Music in the Box (Paramètres › Plugins) pour afficher les paroles." />;
+  if (entry === "error") return <LyricsNote title="Paroles indisponibles" body="YouTube Music n’a pas répondu. Réessayez dans un instant." />;
+  if (!entry) return <LyricsNote title="Pas de paroles pour ce titre" body="YouTube Music n’en propose pas : c’est souvent le cas des morceaux instrumentaux." />;
+  return <LyricsScroller key={trackKey} lyrics={entry} durationMs={durationMs} live={live} onSeek={onSeek} />;
+}
 
-  // nouveau titre : on repart du haut, suivi actif
-  useEffect(() => {
-    hold.current = 0;
-    box.current?.scrollTo({ top: 0 });
-  }, [trackKey]);
+/** Durée pendant laquelle le suivi attend après un défilement à la main (ms). */
+const LYRICS_HOLD_MS = 8000;
+/** Place de la ligne chantée dans la hauteur de la zone (0 : en haut, 1 : en bas). */
+const LYRICS_FOCUS = 0.36;
+
+function LyricsScroller({ lyrics, durationMs, live, onSeek }: { lyrics: Lyrics; durationMs: number; live: () => number; onSeek: (ms: number) => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  const lines = useRef<(HTMLElement | null)[]>([]);
+  const hold = useRef(0);
+  const shownLine = useRef(-2);
+  const times = lyricsSynced(lyrics) ? lyrics.times : null;
+  /** Ligne chantée (synchronisées seulement) ; -1 pendant l'introduction. */
+  const [active, setActive] = useState(-1);
+  /** Suivi en attente : on a fait défiler à la main. */
+  const [paused, setPaused] = useState(false);
 
   useAnimationFrame(() => {
     const el = box.current;
-    if (!el || !found || Date.now() < hold.current) return;
+    if (!el) return;
+    const now = live();
+    if (times) {
+      const i = lyricsLineAt(times, now);
+      if (i !== shownLine.current) {
+        shownLine.current = i;
+        setActive(i);
+      }
+    }
+    if (Date.now() < hold.current) return;
+    if (paused) setPaused(false);
     const max = el.scrollHeight - el.clientHeight;
     if (max <= 0) return;
-    const target = max * lyricsProgress(live(), durationMs);
-    const d = target - el.scrollTop;
+    let target: number;
+    if (times) {
+      // la ligne chantée vient se placer un peu au-dessus du milieu
+      const line = lines.current[shownLine.current];
+      target = line ? line.offsetTop + line.offsetHeight / 2 - el.clientHeight * LYRICS_FOCUS : 0;
+    } else target = max * lyricsProgress(now, durationMs);
+    const d = Math.max(0, Math.min(max, target)) - el.scrollTop;
     if (Math.abs(d) < 0.5) return;
-    el.scrollTop += reduced() ? d : d * 0.05;
+    el.scrollTop += reduced() ? d : d * (times ? 0.11 : 0.05);
   });
 
   const pause = () => {
-    hold.current = Date.now() + 8000;
+    hold.current = Date.now() + LYRICS_HOLD_MS;
+    setPaused(true);
+  };
+  const resume = () => {
+    hold.current = 0;
+    setPaused(false);
   };
   const onKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     const dir = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
@@ -1570,39 +1605,91 @@ function LyricsView({ entry, hasTrack, trackKey, durationMs, live }: { entry: Ly
     el.scrollBy({ top: dir * 96, behavior: reduced() ? "instant" : "smooth" });
   };
 
-  if (!hasTrack) return <LyricsNote title="Aucun titre en cours" body="Lancez un titre sur YouTube Music : ses paroles s’afficheront ici." />;
-  if (entry === undefined) return <Loading />;
-  if (entry === "old") return <LyricsNote title="Paroles indisponibles" body="Mettez à jour le plugin Music in the Box (Paramètres › Plugins) pour afficher les paroles." />;
-  if (entry === "error") return <LyricsNote title="Paroles indisponibles" body="YouTube Music n’a pas répondu. Réessayez dans un instant." />;
-  if (!found) return <LyricsNote title="Pas de paroles pour ce titre" body="YouTube Music n’en propose pas : c’est souvent le cas des morceaux instrumentaux." />;
-
-  const fade = "linear-gradient(180deg, transparent, #000 7%, #000 90%, transparent)";
+  const fade = "linear-gradient(180deg, transparent, #000 9%, #000 86%, transparent)";
+  const calm = reduced();
   return (
-    <div
-      ref={box}
-      tabIndex={0}
-      data-focusable
-      data-autofocus
-      data-nav-capture="y"
-      role="document"
-      aria-label="Paroles"
-      onKeyDown={onKey}
-      onWheel={pause}
-      onPointerDown={pause}
-      className="ibox-focusable -mx-2 min-h-0 flex-1 overflow-y-auto rounded-2xl px-4 py-6 text-center outline-none [--ring-radius:1rem] [scrollbar-width:none]"
-      style={{ maskImage: fade, WebkitMaskImage: fade }}
-    >
-      {/* texte venu de YouTube Music : jamais traduit par iBox */}
-      <div data-no-i18n className="flex flex-col gap-1.5">
-        {found.lines.map((line, i) =>
-          line ? (
-            <p key={i} className="font-display text-[1.12rem] leading-snug font-semibold text-white/90">{line}</p>
-          ) : (
-            <span key={i} aria-hidden="true" className="h-4" />
-          ),
-        )}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={box}
+        tabIndex={0}
+        data-focusable
+        data-autofocus
+        data-nav-capture="y"
+        role="document"
+        aria-label="Paroles"
+        onKeyDown={onKey}
+        onWheel={pause}
+        onPointerDown={pause}
+        className="ibox-focusable relative -mx-2 min-h-0 flex-1 overflow-y-auto rounded-2xl px-5 text-center outline-none [--ring-radius:1rem] [scrollbar-width:none]"
+        style={{ maskImage: fade, WebkitMaskImage: fade }}
+      >
+        {/* marges hautes et basses : la première et la dernière ligne peuvent venir à la place de lecture */}
+        <div aria-hidden="true" className={times ? "h-[28%]" : "h-6"} />
+        {/* texte venu de YouTube Music : jamais traduit par iBox */}
+        <motion.div data-no-i18n initial={calm ? false : { opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={TWEEN.base} className={`flex flex-col ${times ? "gap-3.5" : "gap-1.5"}`}>
+          {lyrics.lines.map((line, i) => {
+            if (!times) return line ? <p key={i} className="font-display text-[1.12rem] leading-snug font-semibold text-white/90">{line}</p> : <span key={i} aria-hidden="true" className="h-4" />;
+            const state = i === active ? "active" : i < active ? "past" : i === active + 1 ? "next" : "later";
+            return (
+              <p
+                key={i}
+                ref={(el) => {
+                  lines.current[i] = el;
+                }}
+                data-state={state}
+                aria-current={state === "active" || undefined}
+                title="Aller à cette ligne"
+                // un clic amène la lecture au début de la ligne, et le suivi reprend
+                onClick={() => {
+                  sound.play("select");
+                  resume();
+                  onSeek(times[i]);
+                }}
+                className={`ibox-lyric cursor-pointer font-display text-[1.22rem] leading-snug font-semibold ${calm ? "" : "ibox-lyric-motion"}`}
+              >
+                {line || "♪"}
+              </p>
+            );
+          })}
+        </motion.div>
+        <p className="mt-8 text-[0.72rem] font-bold text-white/40">
+          {lyrics.source && <span data-no-i18n>{lyrics.source}</span>}
+          {!times && <span className="block">Paroles non synchronisées pour ce titre : le défilement est estimé.</span>}
+        </p>
+        <div aria-hidden="true" className={times ? "h-[52%]" : "h-6"} />
       </div>
-      {found.source && <p data-no-i18n className="mt-8 text-[0.72rem] font-bold text-white/40">{found.source}</p>}
+      {/* on a fait défiler à la main : un appui pour revenir à la ligne chantée */}
+      <AnimatePresence>
+        {paused && (
+          <motion.button
+            type="button"
+            data-focusable
+            initial={{ opacity: 0, y: 8, scale: 0.94 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 6, transition: TWEEN.exit }}
+            transition={{ ...SPRING.snappy, opacity: TWEEN.fast }}
+            onClick={() => {
+              sound.play("select");
+              resume();
+            }}
+            className="ibox-focusable tone-blue absolute bottom-2 left-1/2 flex h-9 -translate-x-1/2 items-center gap-2 rounded-full bg-[color-mix(in_srgb,var(--tone)_60%,rgba(20,24,40,0.9))] px-4 text-[0.82rem] font-bold shadow-[0_10px_24px_-10px_rgba(0,0,0,0.7)] [--ring-radius:999px]"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 5v14M6 13l6 6 6-6" />
+            </svg>
+            Reprendre le suivi
+          </motion.button>
+        )}
+      </AnimatePresence>
+      {/* états des lignes synchronisées : la ligne chantée grandit et s'éclaire, les autres s'estompent */}
+      <style>{`
+        .ibox-lyric { opacity: .34; transform: scale(.94); transform-origin: 50% 50%; color: #fff; }
+        .ibox-lyric[data-state="next"] { opacity: .62; }
+        .ibox-lyric[data-state="later"] { opacity: .44; }
+        .ibox-lyric[data-state="active"] { opacity: 1; transform: scale(1.06); text-shadow: 0 0 26px rgba(255,255,255,.34); }
+        .ibox-lyric:hover { opacity: .9; }
+        .ibox-lyric-motion { transition: opacity var(--dur-slow, 480ms) var(--ease-out-soft, cubic-bezier(.22,1,.36,1)), transform var(--dur-spring, 520ms) var(--ease-spring, cubic-bezier(.22,1,.36,1)), text-shadow var(--dur-slow, 480ms) ease-out; will-change: transform, opacity; }
+      `}</style>
     </div>
   );
 }

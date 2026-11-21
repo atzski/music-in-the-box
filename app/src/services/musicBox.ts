@@ -96,6 +96,35 @@ export interface Lyrics {
   lines: string[];
   /** « Source : Musixmatch » : affichée telle que YouTube Music la donne. */
   source: string | null;
+  /**
+   * Paroles synchronisées (pont 1.0.4 et plus) : l'instant où chaque ligne commence, en ms,
+   * une valeur par ligne. Absent quand YouTube Music ne donne pas d'horaires (clips, certains
+   * titres) : le texte défile alors à un rythme estimé.
+   */
+  times?: number[] | null;
+}
+
+/** Les horaires sont-ils utilisables ? (un par ligne, croissants) */
+export function lyricsSynced(lyrics: Lyrics): lyrics is Lyrics & { times: number[] } {
+  const t = lyrics.times;
+  return Array.isArray(t) && t.length > 0 && t.length === lyrics.lines.length && t.every((v, i) => Number.isFinite(v) && (i === 0 || v >= t[i - 1]));
+}
+
+/**
+ * Ligne chantée à l'instant `positionMs` : la dernière dont l'horaire est passé. -1 avant la
+ * première (introduction). `leadMs` avance un peu l'affichage : l'œil lit avant l'oreille.
+ */
+export function lyricsLineAt(times: readonly number[], positionMs: number, leadMs = 180): number {
+  const at = positionMs + leadMs;
+  let low = 0, high = times.length - 1, found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (times[mid] <= at) {
+      found = mid;
+      low = mid + 1;
+    } else high = mid - 1;
+  }
+  return found;
 }
 
 /**
