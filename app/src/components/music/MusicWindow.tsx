@@ -1,9 +1,9 @@
 import { EASE as EASES, SPRING, TWEEN } from "@/motion/tokens";
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import { animate, AnimatePresence, motion, useAnimationFrame, useMotionValue, useSpring, useTransform } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DEFAULT_POSITION, formatTime, loadPlaylist, lyricsLineAt, lyricsProgress, lyricsSynced, music, parseLaunches, placeCard, positionAt, positionOf, pushLaunch, radioOf, seekBy, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type Launch, type Lyrics, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
+import { DEFAULT_POSITION, compactSize, formatTime, loadPlaylist, lyricsLineAt, lyricsProgress, lyricsSynced, music, parseLaunches, placeCard, positionAt, positionOf, pushLaunch, radioOf, seekBy, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type Launch, type Lyrics, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
 import { sound } from "@/services/sound";
 import { Icon, type IconName } from "@/components/ui/Icon";
 import { PadKeyboard } from "@/components/shell/PadKeyboard";
@@ -12,6 +12,9 @@ import { useSettings } from "@/services/settings";
 import { Logo } from "./Logo";
 
 const MINI_W = 380;
+/** Mode réduit : une barre fine, de taille fixe (la carte s'y anime d'un seul geste). */
+const COMPACT_W = 340;
+const COMPACT_H = 76;
 const BIG_W = 520;
 const BIG_H_MAX = 780;
 const RECENT_KEY = "ibox.music.recent";
@@ -36,7 +39,7 @@ const TABS: { value: Tab; label: string; tone: string }[] = [
 ];
 /** Vues qui ne valent que pour un titre de YouTube Music en cours. */
 const NEEDS_TRACK: View[] = ["queue", "lyrics"];
-type SearchKind = "songs" | "artists" | "albums";
+type SearchKind = "songs" | "videos" | "artists" | "albums";
 
 /** Playlists gardées d'une ouverture du panneau à l'autre. */
 let cachedPlaylists: Playlist[] | null = null;
@@ -118,7 +121,7 @@ export function MusicWindow() {
   const [playlists, setPlaylists] = useState<Playlist[] | null>(cachedPlaylists);
   const [listsError, setListsError] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ list: Playlist; tracks: Track[] | null } | null>(null);
-  const [search, setSearch] = useState<SearchState>({ query: "", kind: "songs", songs: null, artists: null, albums: null, loading: false });
+  const [search, setSearch] = useState<SearchState>({ query: "", kind: "songs", songs: null, videos: null, artists: null, albums: null, loading: false });
   const [artist, setArtist] = useState<{ id: string; preview: Artist; page: ArtistPage | null } | null>(null);
   const [album, setAlbum] = useState<{ id: string; preview: Album; page: AlbumPage | null } | null>(null);
   /** Paroles du titre affiché dans la vue Paroles (`entry` absent : en cours de lecture). */
@@ -134,6 +137,18 @@ export function MusicWindow() {
   const position = useSettings((s) => s.musicPosition ?? DEFAULT_POSITION);
   const setSetting = useSettings((s) => s.set);
   const stayOpen = useSettings((s) => s.musicStayOpen === true);
+  // mode réduit : retenu d'une ouverture à l'autre ; il ne vaut que pour le mini-lecteur
+  const compactSetting = useSettings((s) => s.musicCompact === true);
+  const compact = compactSetting && view === "mini";
+  const setCompact = useCallback(
+    (on: boolean) => {
+      sound.play("toggle");
+      setSetting("musicCompact", on);
+    },
+    [setSetting],
+  );
+  /** La carte vient d'être déplacée : le clic qui termine le geste n'agrandit pas la barre. */
+  const dragged = useRef(false);
 
   // comme l'overlay de capture : thème clair (où « white » est vraiment blanc) sur un voile sombre
   useEffect(() => {
@@ -286,7 +301,7 @@ export function MusicWindow() {
     return () => window.clearTimeout(t);
     // les paroles arrivent après la vue : le focus se pose sur elles dès qu'elles sont là ;
     // de même quand le lecteur laisse la place au démarrage rapide (plus rien ne joue), ou l'inverse
-  }, [view, detail?.list.id, artist?.id, album?.id, open, lyricsReady, hasTrack]);
+  }, [view, compact, detail?.list.id, artist?.id, album?.id, open, lyricsReady, hasTrack]);
 
   // Retour : fiche → liste → mini-lecteur → fermeture (ou retour au jeu)
   useEffect(
@@ -317,19 +332,6 @@ export function MusicWindow() {
       }),
     [album, artist, close, detail, go, release, stayOpen, view],
   );
-  // LB / RB : vue précédente / suivante
-  useEffect(
-    () =>
-      input.onTab((d) => {
-        let i = ORDER.indexOf(view) + d;
-        // sans titre YouTube Music en cours, « À suivre » et « Paroles » n'ont rien à montrer : on les saute
-        while (i > 0 && i < ORDER.length && NEEDS_TRACK.includes(ORDER[i]) && !youtube) i += d;
-        if (i < 0 || i >= ORDER.length || (i > 0 && !state?.youtube)) return "quiet";
-        go(ORDER[i]);
-      }),
-    [go, state?.youtube, view, youtube],
-  );
-
   const act = useCallback(async (action: MusicAction, value?: number) => {
     if (busy.current && action !== "volume") return;
     busy.current = true;
@@ -342,6 +344,25 @@ export function MusicWindow() {
       busy.current = false;
     }
   }, []);
+
+  // LB / RB : vue précédente / suivante ; en mode réduit, titre précédent / suivant
+  useEffect(
+    () =>
+      input.onTab((d) => {
+        if (compact) {
+          if (!n) return "quiet";
+          sound.play("select");
+          void act(d < 0 ? "prev" : "next");
+          return;
+        }
+        let i = ORDER.indexOf(view) + d;
+        // sans titre YouTube Music en cours, « À suivre » et « Paroles » n'ont rien à montrer : on les saute
+        while (i > 0 && i < ORDER.length && NEEDS_TRACK.includes(ORDER[i]) && !youtube) i += d;
+        if (i < 0 || i >= ORDER.length || (i > 0 && !state?.youtube)) return "quiet";
+        go(ORDER[i]);
+      }),
+    [act, compact, go, n, state?.youtube, view, youtube],
+  );
 
   const play = useCallback(async (item: { videoId?: string; playlistId?: string; index?: number }, memo?: Launch) => {
     sound.play("select");
@@ -395,11 +416,18 @@ export function MusicWindow() {
   const searchSeq = useRef(0);
   const runSearch = useCallback((q: string) => {
     const text = q.trim();
-    if (!text) return setSearch((s) => ({ ...s, songs: null, artists: null, albums: null, loading: false }));
+    if (!text) return setSearch((s) => ({ ...s, songs: null, videos: null, artists: null, albums: null, loading: false }));
     const id = ++searchSeq.current;
     setSearch((s) => ({ ...s, loading: true }));
-    void Promise.all([music.search(text).catch(() => [] as Track[]), music.searchArtists(text).catch(() => [] as Artist[]), music.searchAlbums(text).catch(() => [] as Album[])]).then(([songs, artists, albums]) => {
-      if (id === searchSeq.current) setSearch((s) => ({ ...s, songs, artists, albums, loading: false }));
+    void Promise.all([
+      music.search(text).catch(() => [] as Track[]),
+      music.searchVideos(text).catch(() => [] as Track[]),
+      music.searchArtists(text).catch(() => [] as Artist[]),
+      music.searchAlbums(text).catch(() => [] as Album[]),
+    ]).then(([songs, videos, artists, albums]) => {
+      if (id !== searchSeq.current) return;
+      // aucun titre officiel (son de fan, extrait de jeu, remix…) : on montre aussitôt les vidéos
+      setSearch((s) => ({ ...s, songs, videos, artists, albums, loading: false, kind: s.kind === "songs" && !songs.length && videos.length ? "videos" : s.kind }));
     });
   }, []);
   useEffect(() => {
@@ -432,6 +460,11 @@ export function MusicWindow() {
         if (n) void act("toggle");
         return;
       }
+      // Menu (Start) : mode réduit ⇄ mini-lecteur
+      if (a === "start") {
+        if (view === "mini") setCompact(!compact);
+        return;
+      }
       if (a === "y") {
         if (view === "mini" && youtube) void act("like");
         else if (detail) void play({ playlistId: detail.list.playlistId }, launchOf(detail.list));
@@ -441,7 +474,7 @@ export function MusicWindow() {
       if (map[a]) input.dispatch(map[a]);
     });
     return () => void off.then((f) => f());
-  }, [act, detail, n, play, view, youtube]);
+  }, [act, compact, detail, n, play, setCompact, view, youtube]);
 
   // clavier : les mêmes gestes qu'à la manette (X : lecture / pause, F : j'aime ou lire la
   // playlist), plus Espace, comme dans tout lecteur
@@ -460,16 +493,22 @@ export function MusicWindow() {
         else if (detail) void play({ playlistId: detail.list.playlistId }, launchOf(detail.list));
         else return;
         e.preventDefault();
+      } else if (key === "r" && view === "mini") {
+        // R : mode réduit ⇄ mini-lecteur (comme Menu à la manette)
+        e.preventDefault();
+        setCompact(!compact);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [act, detail, n, play, view, youtube]);
+  }, [act, compact, detail, n, play, setCompact, view, youtube]);
 
   const tint = useDominantColor(n?.artwork ?? null);
   const expanded = view !== "mini";
-  const W = expanded ? BIG_W : MINI_W;
-  const H = expanded ? Math.min(BIG_H_MAX, screen.h - 48) : miniH;
+  // la barre réduite suit la police racine (qui grandit avec la largeur de l'écran)
+  const small = useMemo(() => compactSize(parseFloat(getComputedStyle(document.documentElement).fontSize), COMPACT_W, COMPACT_H), [screen.w]);
+  const W = expanded ? BIG_W : compact ? small.w : MINI_W;
+  const H = expanded ? Math.min(BIG_H_MAX, screen.h - 48) : compact ? small.h : miniH;
   const place = moving ?? placeCard(position, W, H, screen.w, screen.h);
 
   // déplacer la carte par le haut ; vers un autre écran, la fenêtre suit la souris
@@ -482,8 +521,13 @@ export function MusicWindow() {
     target.setPointerCapture(e.pointerId);
     let moved = false;
     let following = false;
+    dragged.current = false;
+    const start = { x: e.clientX, y: e.clientY };
     const onMove = (ev: PointerEvent) => {
+      // quelques pixels de tolérance : un simple clic n'est pas un déplacement
+      if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 4) return;
       moved = true;
+      dragged.current = true;
       const W0 = window.innerWidth, H0 = window.innerHeight;
       // la souris sort de l'écran : la fenêtre du lecteur passe sur l'écran voisin
       if (!following && (ev.clientX < 1 || ev.clientY < 1 || ev.clientX > W0 - 2 || ev.clientY > H0 - 2)) {
@@ -508,7 +552,7 @@ export function MusicWindow() {
   };
 
   // clé et sens du contenu (pour des fondus orientés)
-  const contentKey = view === "mini" ? "mini" : view === "search" && album ? `album-${album.id}` : view === "search" && artist ? `artist-${artist.id}` : view === "lists" && detail ? `list-${detail.list.id}` : view;
+  const contentKey = view === "mini" ? (compact ? "compact" : "mini") : view === "search" && album ? `album-${album.id}` : view === "search" && artist ? `artist-${artist.id}` : view === "lists" && detail ? `list-${detail.list.id}` : view;
 
   return (
     <div
@@ -524,19 +568,23 @@ export function MusicWindow() {
             key="card"
             ref={card}
             aria-label="Music in the Box"
-            initial={{ opacity: 0, scale: 0.94, y: -20, left: place.left, top: place.top, width: W, height: H }}
-            animate={{ opacity: 1, scale: 1, y: 0, left: place.left, top: place.top, width: W, height: H }}
+            initial={{ opacity: 0, scale: 0.94, y: -20, left: place.left, top: place.top, width: W, height: H, borderRadius: compact ? 24 : 32 }}
+            animate={{ opacity: 1, scale: 1, y: 0, left: place.left, top: place.top, width: W, height: H, borderRadius: compact ? 24 : 32 }}
             exit={{ opacity: 0, scale: 0.96, y: -14, transition: { duration: 0.2, ease: EASE } }}
             transition={moving || reduced() ? { duration: 0 } : { ...CARD_SPRING, opacity: { duration: 0.25 } }}
-            className="absolute overflow-hidden rounded-[2rem] shadow-[0_30px_80px_-30px_rgba(0,0,0,0.8)] ring-1 ring-white/10 will-change-[width,height,transform]"
+            className="absolute overflow-hidden shadow-[0_30px_80px_-30px_rgba(0,0,0,0.8)] ring-1 ring-white/10 will-change-[width,height,transform]"
           >
             <Glass card={card} tint={tint} />
             <ReportLayout card={card} stayOpen={stayOpen} />
             <AnimatePresence mode="wait" initial={false} custom={dir}>
-              {view === "mini" ? (
+              {compact ? (
+                <Morph key="compact">
+                  <CompactBar n={n} tint={tint} live={live} act={act} onExpand={() => setCompact(false)} onMove={startMove} dragged={dragged} />
+                </Morph>
+              ) : view === "mini" ? (
                 <Fade key="mini" dir={dir}>
                   <div ref={measureMini} className="flex flex-col p-5">
-                    <Header app={n?.app ?? null} playing={!!n?.playing} onClose={close} onMove={startMove} />
+                    <Header app={n?.app ?? null} playing={!!n?.playing} onClose={close} onMove={startMove} onCompact={() => setCompact(true)} />
                     {n ? (
                       <Player n={n} tint={tint} live={live} onSeek={(ms) => void act("seek", ms)} act={act} />
                     ) : (
@@ -777,6 +825,155 @@ function Fade({ children, fill, dir }: { children: ReactNode; fill?: boolean; di
   );
 }
 
+/**
+ * Passage mini-lecteur ⇄ mode réduit : la carte change de forme d'un seul ressort ; le
+ * contenu, lui, se fond sur place (sans glisser de côté), avec un léger flou de mise au point.
+ */
+const morphVariants = {
+  enter: () => (reduced() ? { opacity: 0 } : { opacity: 0, scale: 0.96, filter: "blur(6px)" }),
+  center: { opacity: 1, scale: 1, filter: "blur(0px)", transition: { duration: 0.34, ease: EASE, delay: 0.04 } },
+  exit: () => (reduced() ? { opacity: 0, transition: { duration: 0.1 } } : { opacity: 0, scale: 0.98, filter: "blur(4px)", transition: { duration: 0.14, ease: EASES.in } }),
+};
+
+function Morph({ children }: { children: ReactNode }) {
+  return (
+    <motion.div variants={morphVariants} initial="enter" animate="center" exit="exit" className="relative h-full">
+      {children}
+    </motion.div>
+  );
+}
+
+/**
+ * Mode réduit : une barre fine par-dessus le jeu. Pochette, titre et artiste, précédent /
+ * pause / suivant, et la progression en un trait. Toute la barre se déplace ; un clic hors
+ * des boutons (ou sur la pochette) rend le mini-lecteur complet.
+ */
+function CompactBar({ n, tint, live, act, onExpand, onMove, dragged }: {
+  n: MusicState["now"];
+  tint: string;
+  live: () => number;
+  act: (a: MusicAction, v?: number) => Promise<void>;
+  onExpand: () => void;
+  onMove: (e: ReactPointerEvent<HTMLElement>) => void;
+  dragged: RefObject<boolean>;
+}) {
+  return (
+    <div
+      className="relative flex h-full cursor-grab items-center gap-3 pr-3 pl-3 active:cursor-grabbing"
+      onPointerDown={onMove}
+      onClick={(e) => {
+        if (dragged.current || (e.target as HTMLElement).closest("button")) return;
+        onExpand();
+      }}
+      title="Déplacer"
+    >
+      {/* la pochette agrandit le lecteur : au survol, elle le montre */}
+      <motion.button
+        type="button"
+        data-focusable
+        data-autofocus={n ? undefined : true}
+        onClick={onExpand}
+        aria-label="Agrandir le lecteur"
+        title="Agrandir le lecteur"
+        initial="rest"
+        animate="rest"
+        whileHover="hover"
+        whileTap={{ scale: 0.92 }}
+        className="ibox-focusable group relative size-[3.25rem] flex-none overflow-hidden rounded-[0.95rem] bg-black/30 ring-1 ring-white/15 [--ring-radius:0.95rem]"
+        style={{ boxShadow: n ? `0 10px 24px -10px ${tint}` : undefined }}
+      >
+        <motion.div className="absolute inset-0" animate={reduced() ? undefined : { scale: n && !n.playing ? 0.92 : 1 }} transition={SPRING.smooth}>
+          <AnimatePresence initial={false}>
+            <motion.div key={n?.id ?? "none"} initial={{ opacity: 0, scale: 1.1 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.45, ease: EASE }} className="absolute inset-0 overflow-hidden rounded-[0.95rem]">
+              {n ? <Thumb src={n.artwork} fill /> : <div className="grid size-full place-items-center"><Logo size={30} playing={false} /></div>}
+            </motion.div>
+          </AnimatePresence>
+        </motion.div>
+        <motion.span
+          aria-hidden="true"
+          variants={{ rest: { opacity: 0 }, hover: { opacity: 1 } }}
+          transition={TWEEN.fast}
+          className="absolute inset-0 grid place-items-center bg-[rgba(12,14,24,0.5)] backdrop-blur-[2px]"
+        >
+          <motion.svg variants={{ rest: { scale: 0.7 }, hover: { scale: 1 } }} transition={SPRING.snappy} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14 10l6-6M15 4h5v5M10 14l-6 6M4 15v5h5" />
+          </motion.svg>
+        </motion.span>
+      </motion.button>
+
+      <div className="min-w-0 flex-1">
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.div key={n?.id ?? "none"} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.25, ease: EASE }}>
+            {n ? (
+              <>
+                <Marquee text={n.title} className="text-[0.9rem] leading-snug font-bold" />
+                <div className="mt-0.5 flex items-center gap-1.5">
+                  <AnimatePresence initial={false}>
+                    {n.playing && (
+                      <motion.div initial={{ opacity: 0, width: 0 }} animate={{ opacity: 1, width: "auto" }} exit={{ opacity: 0, width: 0 }} transition={SPRING.snappy} className="flex-none overflow-hidden">
+                        <div className="origin-left scale-[0.8]">
+                          <Equalizer playing />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                  <Marquee text={n.artist} className="min-w-0 flex-1 text-[0.76rem] font-bold text-white/55" />
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="truncate text-[0.9rem] font-bold">Rien en lecture</p>
+                <p className="truncate text-[0.76rem] font-bold text-white/55">Ouvrir le lecteur</p>
+              </>
+            )}
+          </motion.div>
+        </AnimatePresence>
+      </div>
+
+      {n && (
+        <div className="flex flex-none items-center gap-1.5">
+          <Control small label="Précédent" onClick={() => void act("prev")}>
+            <path d="M19 5L9 12l10 7z" fill="currentColor" />
+            <path d="M6 5v14" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+          </Control>
+          <motion.button
+            type="button"
+            data-focusable
+            data-autofocus
+            whileTap={{ scale: 0.86 }}
+            onClick={() => {
+              sound.play("select");
+              void act("toggle");
+            }}
+            aria-label={n.playing ? "Pause" : "Lecture"}
+            title={n.playing ? "Pause" : "Lecture"}
+            className="ibox-focusable ibox-btn ibox-btn-primary grid size-11 place-items-center rounded-full [--ring-radius:999px]"
+          >
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.svg key={n.playing ? "pause" : "play"} width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={TWEEN.micro}>
+                {n.playing ? (
+                  <>
+                    <rect x="6" y="5" width="4" height="14" rx="1.4" fill="currentColor" />
+                    <rect x="14" y="5" width="4" height="14" rx="1.4" fill="currentColor" />
+                  </>
+                ) : (
+                  <path d="M8 5.5v13l10-6.5z" fill="currentColor" />
+                )}
+              </motion.svg>
+            </AnimatePresence>
+          </motion.button>
+          <Control small label="Suivant" onClick={() => void act("next")}>
+            <path d="M5 5l10 7-10 7z" fill="currentColor" />
+            <path d="M18 5v14" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+          </Control>
+        </div>
+      )}
+
+      {n && <LiveProgress live={live} durationMs={n.durationMs} trackKey={n.id} line />}
+    </div>
+  );
+}
+
 /** Apparition en cascade, très rapide et une seule fois (les 12 premiers éléments). */
 function rise(index: number) {
   return reduced()
@@ -789,7 +986,7 @@ function Scroll({ children }: { children: ReactNode }) {
   return <div className="-mx-2 min-h-0 flex-1 overflow-y-auto px-2 py-2 [scrollbar-width:none]">{children}</div>;
 }
 
-function Header({ app, playing, onClose, onMove }: { app: string | null; playing: boolean; onClose: () => void; onMove: (e: ReactPointerEvent<HTMLElement>) => void }) {
+function Header({ app, playing, onClose, onMove, onCompact }: { app: string | null; playing: boolean; onClose: () => void; onMove: (e: ReactPointerEvent<HTMLElement>) => void; onCompact: () => void }) {
   return (
     // tout le haut de la carte, d'un bord à l'autre, sert de poignée
     <div className="-mx-5 -mt-5 cursor-grab px-5 pt-2.5 pb-1 active:cursor-grabbing" onPointerDown={onMove} title="Déplacer">
@@ -797,9 +994,37 @@ function Header({ app, playing, onClose, onMove }: { app: string | null; playing
       <div className="flex items-center gap-2.5">
         <Logo size={30} playing={playing} />
         <div className="min-w-0 flex-1 truncate text-[0.8rem] font-bold text-white/55">{app ?? ""}</div>
+        <SizeButton shrink onClick={onCompact} />
         <RoundButton icon="x" label="Fermer" onClick={onClose} />
       </div>
     </div>
+  );
+}
+
+/** Réduire (flèches vers l'intérieur) ou agrandir (vers l'extérieur) le lecteur. */
+function SizeButton({ shrink, onClick, className = "size-10" }: { shrink?: boolean; onClick: () => void; className?: string }) {
+  const label = shrink ? "Mode réduit" : "Agrandir le lecteur";
+  return (
+    <motion.button
+      type="button"
+      data-focusable
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      whileHover={reduced() ? undefined : "hover"}
+      whileTap={{ scale: 0.88 }}
+      className={`ibox-focusable grid flex-none place-items-center rounded-full bg-white/10 transition-colors duration-150 [--ring-radius:999px] hover:bg-white/20 ${className}`}
+    >
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {/* au survol, les deux flèches se rapprochent (réduire) ou s'écartent (agrandir) */}
+        <motion.g variants={{ hover: shrink ? { x: -1, y: 1 } : { x: 1, y: -1 } }} transition={SPRING.snappy}>
+          {shrink ? <path d="M20 4l-6 6M14 5v5h5" /> : <path d="M14 10l6-6M15 4h5v5" />}
+        </motion.g>
+        <motion.g variants={{ hover: shrink ? { x: 1, y: -1 } : { x: -1, y: 1 } }} transition={SPRING.snappy}>
+          {shrink ? <path d="M4 20l6-6M10 19v-5H5" /> : <path d="M10 14l-6 6M4 15v5h5" />}
+        </motion.g>
+      </svg>
+    </motion.button>
   );
 }
 
@@ -1041,7 +1266,7 @@ function Heart({ liked, onClick }: { liked: boolean; onClick: () => void }) {
   );
 }
 
-function Control({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+function Control({ label, onClick, children, small }: { label: string; onClick: () => void; children: ReactNode; small?: boolean }) {
   return (
     <motion.button
       type="button"
@@ -1053,9 +1278,9 @@ function Control({ label, onClick, children }: { label: string; onClick: () => v
         sound.play("select");
         onClick();
       }}
-      className="ibox-focusable grid size-11 place-items-center rounded-full bg-white/10 transition-colors [--ring-radius:999px] hover:bg-white/20"
+      className={`ibox-focusable grid place-items-center rounded-full transition-colors [--ring-radius:999px] ${small ? "size-9 bg-transparent hover:bg-white/12" : "size-11 bg-white/10 hover:bg-white/20"}`}
     >
-      <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+      <svg width={small ? 16 : 20} height={small ? 16 : 20} viewBox="0 0 24 24" aria-hidden="true">
         {children}
       </svg>
     </motion.button>
@@ -1717,6 +1942,17 @@ const SEARCH_TABS: { value: SearchKind; label: string; tone: string; icon: React
     ),
   },
   {
+    value: "videos",
+    label: "Vidéos",
+    tone: "tone-red",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="2.5" y="5" width="19" height="14" rx="4" />
+        <path d="M10 9.3v5.4l4.6-2.7z" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
     value: "artists",
     label: "Artistes",
     tone: "tone-pink",
@@ -1740,9 +1976,9 @@ const SEARCH_TABS: { value: SearchKind; label: string; tone: string; icon: React
   },
 ];
 
-type SearchState = { query: string; kind: SearchKind; songs: Track[] | null; artists: Artist[] | null; albums: Album[] | null; loading: boolean };
+type SearchState = { query: string; kind: SearchKind; songs: Track[] | null; videos: Track[] | null; artists: Artist[] | null; albums: Album[] | null; loading: boolean };
 
-/** Recherche : titres, artistes ou albums (onglets en icônes). Clavier virtuel d'iBox à la manette. */
+/** Recherche : titres, vidéos (sons de fans, extraits, remix…), artistes ou albums (onglets en icônes). Clavier virtuel d'iBox à la manette. */
 function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, onAlbum }: {
   search: SearchState;
   current: MusicState["now"];
@@ -1761,7 +1997,7 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, 
       <div className="flex items-center gap-2">
         <label className="flex h-12 min-w-0 flex-1 items-center gap-3 rounded-2xl bg-white/10 px-4 transition-colors focus-within:bg-white/16">
           <Icon name="search" size="1.1rem" className="flex-none text-white/60" />
-          <span className="sr-only">Rechercher un titre, un artiste ou un album</span>
+          <span className="sr-only">Rechercher un titre, une vidéo, un artiste ou un album</span>
           <input
             data-focusable
             data-autofocus
@@ -1774,7 +2010,7 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, 
                 onSubmit();
               }
             }}
-            placeholder="Titre, artiste, album…"
+            placeholder="Titre, vidéo, artiste, album…"
             className="ibox-focusable h-full min-w-0 flex-1 bg-transparent text-[0.95rem] font-bold text-white outline-none placeholder:text-white/40"
           />
           {search.loading && <span className="size-4 flex-none animate-spin rounded-full border-2 border-white/25 border-t-white" aria-label="Recherche…" />}
@@ -1803,8 +2039,8 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, 
         ) : (
           <AnimatePresence mode="wait" initial={false}>
             <motion.div key={search.kind} initial={{ opacity: 0, x: search.kind === "songs" ? -16 : 16 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.2, ease: EASE }} className="mt-1 flex flex-col gap-0.5">
-              {search.kind === "songs"
-                ? (search.songs ?? []).map((t, i) => (
+              {search.kind === "songs" || search.kind === "videos"
+                ? (search[search.kind] ?? []).map((t, i) => (
                     <Row
                       key={t.videoId}
                       index={i}
@@ -1953,7 +2189,7 @@ function Empty({ youtube, loading, launches, onPlay }: { youtube: boolean; loadi
  * un vrai saut, nouveau titre ou déplacement, est suivi aussitôt). Rien n'est re-rendu par
  * React : la barre, le curseur et le temps sont écrits directement.
  */
-function LiveProgress({ live, durationMs, canSeek, trackKey, onSeek, compact }: { live: () => number; durationMs: number; canSeek?: boolean; trackKey: string; onSeek?: (ms: number) => void; compact?: boolean }) {
+function LiveProgress({ live, durationMs, canSeek, trackKey, onSeek, compact, line }: { live: () => number; durationMs: number; canSeek?: boolean; trackKey: string; onSeek?: (ms: number) => void; compact?: boolean; line?: boolean }) {
   const fill = useRef<HTMLDivElement>(null);
   const knob = useRef<HTMLDivElement>(null);
   const time = useRef<HTMLSpanElement>(null);
@@ -2013,6 +2249,14 @@ function LiveProgress({ live, durationMs, canSeek, trackKey, onSeek, compact }: 
     nudge.current = window.setTimeout(commit, 420);
   };
 
+  // mode réduit : un trait de 2 px au pied de la barre, rentré pour suivre ses coins arrondis
+  if (line) {
+    return (
+      <div aria-hidden="true" className="pointer-events-none absolute right-6 bottom-[5px] left-6 h-[2px] overflow-hidden rounded-full bg-white/10">
+        <div ref={fill} className="h-full origin-left rounded-full bg-[linear-gradient(90deg,var(--ibox-sky),var(--ibox-lavender))] will-change-transform" style={{ transform: "scaleX(0)" }} />
+      </div>
+    );
+  }
   if (compact) {
     return (
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/12">

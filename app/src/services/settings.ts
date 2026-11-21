@@ -14,6 +14,8 @@ export interface SettingsState {
   musicPosition?: { x: number; y: number };
   /** Le lecteur reste affiché pendant le jeu. */
   musicStayOpen?: boolean;
+  /** Mode réduit (une barre fine : pochette, titre, précédent / pause / suivant). */
+  musicCompact?: boolean;
   /** Écran du lecteur (nom Windows) ; absent : l'écran principal. */
   musicMonitor?: string;
   soundEnabled: boolean;
