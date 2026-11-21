@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKe
 import { animate, AnimatePresence, motion, useAnimationFrame, useMotionValue, useSpring, useTransform } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DEFAULT_POSITION, formatTime, loadPlaylist, music, placeCard, positionAt, positionOf, upNext, type Artist, type ArtistPage, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
+import { DEFAULT_POSITION, formatTime, loadPlaylist, music, placeCard, positionAt, positionOf, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
 import { sound } from "@/services/sound";
 import { Icon, type IconName } from "@/components/ui/Icon";
 import { PadKeyboard } from "@/components/shell/PadKeyboard";
@@ -29,7 +29,7 @@ const TABS: { value: Tab; label: string; tone: string }[] = [
   { value: "queue", label: "À suivre", tone: "tone-green" },
   { value: "search", label: "Rechercher", tone: "tone-orange" },
 ];
-type SearchKind = "songs" | "artists";
+type SearchKind = "songs" | "artists" | "albums";
 
 /** Playlists gardées d'une ouverture du panneau à l'autre. */
 let cachedPlaylists: Playlist[] | null = null;
@@ -86,8 +86,9 @@ export function MusicWindow() {
   const [playlists, setPlaylists] = useState<Playlist[] | null>(cachedPlaylists);
   const [listsError, setListsError] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ list: Playlist; tracks: Track[] | null } | null>(null);
-  const [search, setSearch] = useState<{ query: string; kind: SearchKind; songs: Track[] | null; artists: Artist[] | null; loading: boolean }>({ query: "", kind: "songs", songs: null, artists: null, loading: false });
+  const [search, setSearch] = useState<SearchState>({ query: "", kind: "songs", songs: null, artists: null, albums: null, loading: false });
   const [artist, setArtist] = useState<{ id: string; preview: Artist; page: ArtistPage | null } | null>(null);
+  const [album, setAlbum] = useState<{ id: string; preview: Album; page: AlbumPage | null } | null>(null);
   const [screen, setScreen] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [miniH, setMiniH] = useState(520);
   const [moving, setMoving] = useState<{ left: number; top: number } | null>(null);
@@ -202,6 +203,7 @@ export function MusicWindow() {
     });
     setDetail(null);
     setArtist(null);
+    setAlbum(null);
   }, []);
 
   // focus initial de chaque vue (anneau d'iBox), une fois la vue affichée
@@ -209,12 +211,17 @@ export function MusicWindow() {
     if (!open) return;
     const t = window.setTimeout(() => input.focusInitial(), 260);
     return () => window.clearTimeout(t);
-  }, [view, detail?.list.id, artist?.id, open]);
+  }, [view, detail?.list.id, artist?.id, album?.id, open]);
 
   // Retour : fiche → liste → mini-lecteur → fermeture (ou retour au jeu)
   useEffect(
     () =>
       input.onBack(() => {
+        if (album) {
+          setDir(-1);
+          setAlbum(null);
+          return true;
+        }
         if (artist) {
           setDir(-1);
           setArtist(null);
@@ -233,7 +240,7 @@ export function MusicWindow() {
         else close();
         return "quiet";
       }),
-    [artist, close, detail, go, release, stayOpen, view],
+    [album, artist, close, detail, go, release, stayOpen, view],
   );
   // LB / RB : vue précédente / suivante
   useEffect(
@@ -269,6 +276,7 @@ export function MusicWindow() {
       setView("mini");
       setDetail(null);
       setArtist(null);
+      setAlbum(null);
       window.setTimeout(() => void music.state().then(setState).catch(() => undefined), 1200);
     } catch {
       setError("Lecture impossible.");
@@ -292,15 +300,24 @@ export function MusicWindow() {
       .catch(() => setArtist((x) => (x?.id === a.id ? { ...x, page: { name: a.name, thumbnail: a.thumbnail, tracks: [] } } : x)));
   }, []);
 
-  // recherche pendant la frappe, après une courte pause ; titres et artistes en parallèle
+  const openAlbum = useCallback((a: Album) => {
+    setDir(1);
+    setAlbum({ id: a.id, preview: a, page: null });
+    music
+      .album(a.id)
+      .then((page) => setAlbum((x) => (x?.id === a.id ? { ...x, page } : x)))
+      .catch(() => setAlbum((x) => (x?.id === a.id ? { ...x, page: { title: a.title, artist: a.artist, year: a.year, thumbnail: a.thumbnail, playlistId: null, tracks: [] } } : x)));
+  }, []);
+
+  // recherche pendant la frappe, après une courte pause ; titres, artistes et albums en parallèle
   const searchSeq = useRef(0);
   const runSearch = useCallback((q: string) => {
     const text = q.trim();
-    if (!text) return setSearch((s) => ({ ...s, songs: null, artists: null, loading: false }));
+    if (!text) return setSearch((s) => ({ ...s, songs: null, artists: null, albums: null, loading: false }));
     const id = ++searchSeq.current;
     setSearch((s) => ({ ...s, loading: true }));
-    void Promise.all([music.search(text).catch(() => [] as Track[]), music.searchArtists(text).catch(() => [] as Artist[])]).then(([songs, artists]) => {
-      if (id === searchSeq.current) setSearch((s) => ({ ...s, songs, artists, loading: false }));
+    void Promise.all([music.search(text).catch(() => [] as Track[]), music.searchArtists(text).catch(() => [] as Artist[]), music.searchAlbums(text).catch(() => [] as Album[])]).then(([songs, artists, albums]) => {
+      if (id === searchSeq.current) setSearch((s) => ({ ...s, songs, artists, albums, loading: false }));
     });
   }, []);
   useEffect(() => {
@@ -381,7 +398,7 @@ export function MusicWindow() {
   };
 
   // clé et sens du contenu (pour des fondus orientés)
-  const contentKey = view === "mini" ? "mini" : view === "search" && artist ? `artist-${artist.id}` : view === "lists" && detail ? `list-${detail.list.id}` : view;
+  const contentKey = view === "mini" ? "mini" : view === "search" && album ? `album-${album.id}` : view === "search" && artist ? `artist-${artist.id}` : view === "lists" && detail ? `list-${detail.list.id}` : view;
 
   return (
     <div
@@ -440,7 +457,9 @@ export function MusicWindow() {
                           {view === "queue" ? (
                             <QueueList items={upNext(queue, 50)} current={n} onPlay={(q) => void play({ videoId: q.videoId, playlistId: q.playlistId ?? undefined, index: q.index ?? undefined })} />
                           ) : view === "search" ? (
-                            artist ? (
+                            album ? (
+                              <AlbumDetail album={album} current={n} onPlay={play} />
+                            ) : artist ? (
                               <ArtistDetail artist={artist} current={n} onPlay={(t) => void play({ videoId: t.videoId })} />
                             ) : (
                               <Search
@@ -451,6 +470,7 @@ export function MusicWindow() {
                                 onSubmit={() => runSearch(search.query)}
                                 onPlay={(t) => void play({ videoId: t.videoId })}
                                 onArtist={openArtist}
+                                onAlbum={openAlbum}
                               />
                             )
                           ) : detail ? (
@@ -1303,6 +1323,39 @@ function ArtistDetail({ artist, current, onPlay }: { artist: { preview: Artist; 
   );
 }
 
+/** « EP • Daft Punk • 2001 » : ce qui distingue un album dans une liste. */
+function albumLine(a: { artist: string; year: string | null; type?: string | null }): string {
+  return [a.type, a.artist, a.year].filter(Boolean).join(" • ");
+}
+
+function AlbumDetail({ album, current, onPlay }: { album: { preview: Album; page: AlbumPage | null }; current: MusicState["now"]; onPlay: (i: { videoId?: string; playlistId?: string; index?: number }) => void }) {
+  const page = album.page;
+  const tracks = page?.tracks ?? null;
+  const list = page?.playlistId ?? undefined;
+  // dans la liste de lecture de l'album quand on la connaît : la suite s'enchaîne dans l'ordre
+  const playAt = (i: number) => {
+    const t = tracks?.[i];
+    if (list) onPlay({ videoId: t?.videoId, playlistId: list, index: i });
+    else if (t) onPlay({ videoId: t.videoId });
+  };
+  return (
+    <>
+      <DetailHeader image={page?.thumbnail ?? album.preview.thumbnail} title={page?.title || album.preview.title} subtitle={albumLine(page ? { ...page, type: album.preview.type } : album.preview)} playLabel="Lire l’album" onPlay={() => playAt(0)} />
+      <Scroll>
+        <div className="mt-2 flex flex-col gap-0.5">
+          {tracks === null ? (
+            <Loading />
+          ) : tracks.length === 0 ? (
+            <p className="py-6 text-center text-[0.9rem] font-bold text-white/55">Aucun titre à afficher.</p>
+          ) : (
+            tracks.map((t, i) => <Row key={t.videoId} index={i} title={t.title} artist={t.artist} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => playAt(i)} />)
+          )}
+        </div>
+      </Scroll>
+    </>
+  );
+}
+
 function QueueList({ items, current, onPlay }: { items: QueueItem[]; current: MusicState["now"]; onPlay: (q: QueueItem) => void }) {
   if (!items.length) return <p className="py-10 text-center text-[0.9rem] font-bold text-white/55">Rien à suivre pour l’instant.</p>;
   return (
@@ -1340,27 +1393,41 @@ const SEARCH_TABS: { value: SearchKind; label: string; tone: string; icon: React
       </svg>
     ),
   },
+  {
+    value: "albums",
+    label: "Albums",
+    tone: "tone-purple",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" />
+        <circle cx="12" cy="12" r="2.5" />
+      </svg>
+    ),
+  },
 ];
 
-/** Recherche : titres ou artistes (onglets en icônes). Clavier virtuel d'iBox à la manette. */
-function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist }: {
-  search: { query: string; kind: SearchKind; songs: Track[] | null; artists: Artist[] | null; loading: boolean };
+type SearchState = { query: string; kind: SearchKind; songs: Track[] | null; artists: Artist[] | null; albums: Album[] | null; loading: boolean };
+
+/** Recherche : titres, artistes ou albums (onglets en icônes). Clavier virtuel d'iBox à la manette. */
+function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, onAlbum }: {
+  search: SearchState;
   current: MusicState["now"];
   onQuery: (q: string) => void;
   onKind: (k: SearchKind) => void;
   onSubmit: () => void;
   onPlay: (t: Track) => void;
   onArtist: (a: Artist) => void;
+  onAlbum: (a: Album) => void;
 }) {
   const [recent, setRecent] = useState<string[]>(readRecent);
   const remember = () => search.query.trim() && setRecent(saveRecent(search.query.trim()));
-  const list = search.kind === "songs" ? search.songs : search.artists;
+  const list = search[search.kind];
   return (
     <>
       <div className="flex items-center gap-2">
         <label className="flex h-12 min-w-0 flex-1 items-center gap-3 rounded-2xl bg-white/10 px-4 transition-colors focus-within:bg-white/16">
           <Icon name="search" size="1.1rem" className="flex-none text-white/60" />
-          <span className="sr-only">Rechercher un titre ou un artiste</span>
+          <span className="sr-only">Rechercher un titre, un artiste ou un album</span>
           <input
             data-focusable
             data-autofocus
@@ -1373,7 +1440,7 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist }
                 onSubmit();
               }
             }}
-            placeholder="Titre, artiste…"
+            placeholder="Titre, artiste, album…"
             className="ibox-focusable h-full min-w-0 flex-1 bg-transparent text-[0.95rem] font-bold text-white outline-none placeholder:text-white/40"
           />
           {search.loading && <span className="size-4 flex-none animate-spin rounded-full border-2 border-white/25 border-t-white" aria-label="Recherche…" />}
@@ -1401,7 +1468,7 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist }
           <p className="py-8 text-center text-[0.9rem] font-bold text-white/55">Aucun résultat.</p>
         ) : (
           <AnimatePresence mode="wait" initial={false}>
-            <motion.div key={search.kind} initial={{ opacity: 0, x: search.kind === "artists" ? 16 : -16 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.2, ease: EASE }} className="mt-1 flex flex-col gap-0.5">
+            <motion.div key={search.kind} initial={{ opacity: 0, x: search.kind === "songs" ? -16 : 16 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.2, ease: EASE }} className="mt-1 flex flex-col gap-0.5">
               {search.kind === "songs"
                 ? (search.songs ?? []).map((t, i) => (
                     <Row
@@ -1419,7 +1486,21 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist }
                       }}
                     />
                   ))
-                : (search.artists ?? []).map((a, i) => (
+                : search.kind === "albums"
+                  ? (search.albums ?? []).map((a, i) => (
+                      <Row
+                        key={a.id}
+                        index={i}
+                        title={a.title}
+                        artist={albumLine(a)}
+                        thumbnail={a.thumbnail}
+                        onClick={() => {
+                          remember();
+                          onAlbum(a);
+                        }}
+                      />
+                    ))
+                  : (search.artists ?? []).map((a, i) => (
                     <Row
                       key={a.id}
                       index={i}

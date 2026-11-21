@@ -51,6 +51,27 @@ export interface ArtistPage {
   tracks: Track[];
 }
 
+/** Album trouvé par la recherche (YouTube Music). */
+export interface Album {
+  id: string;
+  title: string;
+  artist: string;
+  year: string | null;
+  /** « EP », « Single »… ; null pour un album. */
+  type: string | null;
+  thumbnail: string | null;
+}
+
+export interface AlbumPage {
+  title: string;
+  artist: string;
+  year: string | null;
+  thumbnail: string | null;
+  /** Liste de lecture de l'album (le lire en entier, dans l'ordre). */
+  playlistId: string | null;
+  tracks: Track[];
+}
+
 export interface Playlist {
   id: string;
   playlistId: string;
@@ -127,6 +148,9 @@ export const music = {
   search: (query: string) => ytm<Track[]>("search", { query, kind: "songs" }),
   searchArtists: (query: string) => ytm<Artist[]>("search", { query, kind: "artists" }),
   artist: (id: string) => ytm<ArtistPage>("artist", { id }),
+  /** Un pont plus ancien (plugin 1.0.1) ne connaît pas les albums et rend des titres : écartés. */
+  searchAlbums: (query: string) => ytm<Album[]>("search", { query, kind: "albums" }).then((l) => l.filter((a) => /^MPRE/.test(a.id ?? ""))),
+  album: (id: string) => ytm<AlbumPage>("album", { id }),
   playlists: () => ytm<Playlist[]>("playlists"),
   playlist: (id: string) => ytm<Track[]>("playlist", { id }),
   /** Une page de playlist (pont 1.0.1 et plus) : `next` à repasser pour la suivante. */

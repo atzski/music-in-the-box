@@ -227,13 +227,17 @@
         }).filter(function (s) { return !/j.aime/i.test(s); }).slice(0, 25)
       };
     },
-    // recherche par catégorie (filtres de YouTube Music) : titres ou artistes
+    // recherche par catégorie (filtres de YouTube Music) : titres, artistes ou albums
     search: async function (a) {
       var q = String((a && a.query) || '').trim();
       if (!q) return [];
-      var kind = a && a.kind === 'artists' ? 'artists' : 'songs';
-      var params = kind === 'artists' ? 'EgWKAQIgAWoMEA4QChADEAQQCRAF' : 'EgWKAQIIAWoMEA4QChADEAQQCRAF';
-      var parse = kind === 'artists' ? P.artists : P.tracks;
+      var KINDS = {
+        songs: ['EgWKAQIIAWoMEA4QChADEAQQCRAF', P.tracks],
+        artists: ['EgWKAQIgAWoMEA4QChADEAQQCRAF', P.artists],
+        albums: ['EgWKAQIYAWoMEA4QChADEAQQCRAF', P.albums]
+      };
+      var k = KINDS[a && a.kind] || KINDS.songs;
+      var params = k[0], parse = k[1];
       var list = parse(await innertube('search', { query: q, params: params }));
       // filtre refusé ou vide : résultats mélangés
       return list.length ? list : parse(await innertube('search', { query: q }));
@@ -243,6 +247,12 @@
       var id = String((a && a.id) || '');
       if (!/^UC/.test(id)) throw new Error('artiste-inconnu');
       return P.artistPage(await innertube('browse', { browseId: id }));
+    },
+    // page d'un album : titres, et la liste de lecture qui permet de le lire en entier
+    album: async function (a) {
+      var id = String((a && a.id) || '');
+      if (!/^MPRE/.test(id)) throw new Error('album-inconnu');
+      return P.albumPage(await innertube('browse', { browseId: id }));
     },
     playlists: async function () {
       if (!cfg('LOGGED_IN')) throw new Error('non-connecte');

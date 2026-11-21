@@ -120,6 +120,51 @@ describe("Music in the Box : réponses YouTube Music", () => {
     expect(page.tracks.map((t) => t.videoId)).toEqual(["t1"]);
   });
 
+  it("trouve les albums d'une recherche et lit la page d'un album", () => {
+    const P3 = P as unknown as {
+      albums: (j: unknown) => { id: string; title: string; artist: string; year: string | null; type: string | null }[];
+      albumPage: (j: unknown) => { title: string; artist: string; year: string | null; thumbnail: string | null; playlistId: string | null; tracks: { videoId: string; artist: string; thumbnail: string | null }[] };
+    };
+    const albumRow = (id: string, title: string, sub: object[]) => ({
+      musicResponsiveListItemRenderer: {
+        navigationEndpoint: { browseEndpoint: { browseId: id, browseEndpointContextSupportedConfigs: { browseEndpointContextMusicConfig: { pageType: "MUSIC_PAGE_TYPE_ALBUM" } } } },
+        flexColumns: [
+          { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: title }] } } },
+          { musicResponsiveListItemFlexColumnRenderer: { text: { runs: sub } } },
+        ],
+      },
+    });
+    const list = P3.albums({
+      a: [
+        albumRow("MPREb_1", "Discovery", [run("Album"), run(" • "), run("Daft Punk", "MUSIC_PAGE_TYPE_ARTIST"), run(" • "), run("2001")]),
+        albumRow("MPREb_2", "Random Access Memories", [run("EP"), run(" • "), run("Daft Punk", "MUSIC_PAGE_TYPE_ARTIST"), run(" • "), run("2013")]),
+        albumRow("MPREb_1", "doublon", []),
+        item("v1", "Un titre", []),
+      ],
+    });
+    expect(list.map((a) => [a.id, a.title, a.artist, a.year, a.type])).toEqual([
+      ["MPREb_1", "Discovery", "Daft Punk", "2001", null],
+      ["MPREb_2", "Random Access Memories", "Daft Punk", "2013", "EP"],
+    ]);
+    const page = P3.albumPage({
+      header: {
+        musicResponsiveHeaderRenderer: {
+          title: { runs: [{ text: "Discovery" }] },
+          straplineTextOne: { runs: [{ text: "Daft Punk" }] },
+          subtitle: { runs: [{ text: "Album" }, { text: " • " }, { text: "2001" }] },
+          thumbnail: { musicThumbnailRenderer: { thumbnail: { thumbnails: [{ url: "cover" }] } } },
+          buttons: [{ musicPlayButtonRenderer: { playNavigationEndpoint: { watchPlaylistEndpoint: { playlistId: "OLAK5uy_x" } } } }],
+        },
+      },
+      shelf: { musicShelfRenderer: { contents: [item("t1", "One More Time", [run("12 M de lectures")], "5:20"), item("t2", "Aerodynamic", [run("Daft Punk", "MUSIC_PAGE_TYPE_ARTIST")])] } },
+    });
+    expect(page).toMatchObject({ title: "Discovery", artist: "Daft Punk", year: "2001", thumbnail: "cover", playlistId: "OLAK5uy_x" });
+    expect(page.tracks.map((t) => [t.videoId, t.artist, t.thumbnail])).toEqual([
+      ["t1", "Daft Punk", "cover"],
+      ["t2", "Daft Punk", "cover"],
+    ]);
+  });
+
   it("lit la file d'attente et le titre en cours", () => {
     const v = (id: string, selected: boolean, index: number) => ({
       playlistPanelVideoRenderer: { videoId: id, selected, title: { runs: [{ text: `T${id}` }] }, shortBylineText: { runs: [{ text: "Artiste • Album" }] }, navigationEndpoint: { watchEndpoint: { videoId: id, playlistId: "PL", index } } },

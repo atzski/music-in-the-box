@@ -121,6 +121,67 @@ var ytmParse = (function () {
     return { name: text(h.title), thumbnail: thumb(h.thumbnail) || thumb(h.foregroundThumbnail), tracks: shelf ? tracks(shelf) : [] };
   }
 
+  // Albums d'une recherche : lignes qui mènent à une page d'album (identifiant MPRE…), et
+  // la carte du meilleur résultat quand c'est un album.
+  // Sous-titre : « Album • Daft Punk • 2001 » → artiste « Daft Punk », année « 2001 » ;
+  // le type n'est gardé que s'il dit autre chose qu'« Album » (EP, Single).
+  function albumInfo(runs) {
+    var parts = runs.map(function (x) { return x.text; }).join('').split(SEP).map(function (s) { return s.trim(); }).filter(Boolean);
+    var linked = runs.filter(function (x) { return /ARTIST|USER_CHANNEL/.test(pageType(x)); }).map(function (x) { return x.text; });
+    var year = parts.filter(function (s) { return /^\d{4}$/.test(s); })[0] || null;
+    var type = parts.length > 1 && !/^\d/.test(parts[0]) && linked.indexOf(parts[0]) < 0 ? parts[0] : null;
+    var rest = parts.filter(function (s) { return s !== type && s !== year; });
+    return { artist: linked.length ? linked.join(', ') : rest[0] || '', year: year, type: type && !/^album$/i.test(type) ? type : null };
+  }
+  function albums(json) {
+    var out = [], seen = {};
+    var add = function (id, title, runs, thumbnail) {
+      if (!id || !/^MPRE/.test(id) || seen[id] || !title) return;
+      seen[id] = 1;
+      var info = albumInfo(runs || []);
+      out.push({ id: id, title: title, artist: info.artist, year: info.year, type: info.type, thumbnail: thumbnail || null });
+    };
+    collect(json, 'musicCardShelfRenderer').forEach(function (c) {
+      var run = c.title && c.title.runs && c.title.runs[0];
+      if (run && /ALBUM/.test(pageType(run))) add(run.navigationEndpoint.browseEndpoint.browseId, run.text, (c.subtitle && c.subtitle.runs) || [], thumb(c.thumbnail));
+    });
+    collect(json, 'musicResponsiveListItemRenderer').forEach(function (r) {
+      var b = r.navigationEndpoint && r.navigationEndpoint.browseEndpoint;
+      if (!b || !/^MPRE/.test(b.browseId || '')) return;
+      var cols = (r.flexColumns || []).map(function (c) { return c.musicResponsiveListItemFlexColumnRenderer && c.musicResponsiveListItemFlexColumnRenderer.text; });
+      add(b.browseId, text(cols[0]), (cols[1] && cols[1].runs) || [], thumb(r.thumbnail));
+    });
+    return out;
+  }
+
+  // Page d'un album : nom, artiste, pochette, titres, et sa liste de lecture (OLAK5uy_…) pour
+  // le lire en entier. Les titres d'un album n'ont souvent ni artiste ni image : ceux de
+  // l'album les remplacent (jamais le nombre d'écoutes pris pour un artiste).
+  function albumPage(json) {
+    var h = find(json, 'musicResponsiveHeaderRenderer') || find(json, 'musicDetailHeaderRenderer') || find(json, 'musicImmersiveHeaderRenderer') || {};
+    var info = albumInfo((h.subtitle && h.subtitle.runs) || []);
+    var artist = text(h.straplineTextOne) || info.artist;
+    var cover = thumb(h.thumbnail);
+    var shelf = find(json, 'musicShelfRenderer') || find(json, 'musicPlaylistShelfRenderer');
+    var list = shelf ? tracks(shelf) : [];
+    list.forEach(function (t) {
+      if (!t.artist || /\d.*(vues|views|écoutes|lectures|plays)/i.test(t.artist) || TIME.test(t.artist)) t.artist = artist;
+      if (!t.thumbnail) t.thumbnail = cover;
+      if (!t.album) t.album = text(h.title) || null;
+    });
+    // la liste de CET album : ses propres titres d'abord, puis l'adresse de la page, puis l'en-tête ;
+    // jamais une recherche dans toute la page (les carrousels « Autres versions », « Vous aimerez
+    // aussi » portent les listes d'autres albums)
+    var we = shelf && collect(shelf, 'watchEndpoint').filter(function (w) { return w && w.playlistId; })[0];
+    var pl = we && we.playlistId;
+    if (!pl) {
+      var m = /[?&]list=([\w-]+)/.exec((find(json, 'microformatDataRenderer') || {}).urlCanonical || '');
+      pl = m && m[1];
+    }
+    if (!pl) pl = (find(h, 'watchPlaylistEndpoint') || {}).playlistId;
+    return { title: text(h.title), artist: artist, year: info.year, thumbnail: cover, playlistId: pl || null, tracks: list };
+  }
+
   // Cartes de playlists (bibliothèque).
   function playlists(json) {
     var out = [], seen = {};
@@ -186,5 +247,5 @@ var ytmParse = (function () {
     return out;
   }
 
-  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue };
+  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue };
 })();
