@@ -1,8 +1,9 @@
+import { EASE as EASES, SPRING, TWEEN } from "@/motion/tokens";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import { animate, AnimatePresence, motion, useAnimationFrame, useMotionValue, useSpring, useTransform } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DEFAULT_POSITION, formatTime, loadPlaylist, music, placeCard, positionAt, positionOf, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
+import { DEFAULT_POSITION, formatTime, loadPlaylist, lyricsProgress, music, parseLaunches, placeCard, positionAt, positionOf, pushLaunch, radioOf, seekBy, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type Launch, type Lyrics, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
 import { sound } from "@/services/sound";
 import { Icon, type IconName } from "@/components/ui/Icon";
 import { PadKeyboard } from "@/components/shell/PadKeyboard";
@@ -14,21 +15,27 @@ const MINI_W = 380;
 const BIG_W = 520;
 const BIG_H_MAX = 780;
 const RECENT_KEY = "ibox.music.recent";
-const EASE = [0.22, 1, 0.36, 1] as const;
+const LAUNCHES_KEY = "ibox.music.launches";
+/** « Titres aimés » : la liste que tout compte YouTube Music possède. */
+const LIKED_ID = "LM";
+const EASE = EASES.out;
 
 /** Animations réduites (réglage d'iBox) : tout devient instantané ou presque. */
 const reduced = () => document.documentElement.dataset.motion === "reduced";
 /** Ressort de la carte : net, sans rebond (position et taille bougent ensemble). */
-const CARD_SPRING = { type: "spring", stiffness: 300, damping: 34, mass: 0.9 } as const;
+const CARD_SPRING = SPRING.smooth;
 
-type View = "mini" | "lists" | "queue" | "search";
+type View = "mini" | "lists" | "queue" | "lyrics" | "search";
 type Tab = Exclude<View, "mini">;
-const ORDER: View[] = ["mini", "lists", "queue", "search"];
+const ORDER: View[] = ["mini", "lists", "queue", "lyrics", "search"];
 const TABS: { value: Tab; label: string; tone: string }[] = [
   { value: "lists", label: "Playlists", tone: "tone-purple" },
   { value: "queue", label: "À suivre", tone: "tone-green" },
+  { value: "lyrics", label: "Paroles", tone: "tone-blue" },
   { value: "search", label: "Rechercher", tone: "tone-orange" },
 ];
+/** Vues qui ne valent que pour un titre de YouTube Music en cours. */
+const NEEDS_TRACK: View[] = ["queue", "lyrics"];
 type SearchKind = "songs" | "artists" | "albums";
 
 /** Playlists gardées d'une ouverture du panneau à l'autre. */
@@ -51,6 +58,31 @@ function fetchTracks(id: string, onTracks?: (tracks: Track[]) => void): Promise<
   loadingTracks.set(id, p);
   return p;
 }
+
+/**
+ * Paroles déjà lues, par titre. `null` : YouTube Music n'en a pas ; « old » : le plugin
+ * installé est trop ancien pour les demander ; « error » : la demande a échoué.
+ */
+type LyricsEntry = Lyrics | null | "old" | "error";
+const cachedLyrics = new Map<string, LyricsEntry>();
+
+function readLaunches(): Launch[] {
+  try {
+    return parseLaunches(localStorage.getItem(LAUNCHES_KEY));
+  } catch {
+    return [];
+  }
+}
+function saveLaunch(launch: Launch): void {
+  try {
+    localStorage.setItem(LAUNCHES_KEY, JSON.stringify(pushLaunch(readLaunches(), launch)));
+  } catch {
+    /* stockage indisponible : le démarrage rapide ne proposera que les titres aimés */
+  }
+}
+
+/** Ce qu'il faut retenir d'une playlist lancée pour la reproposer. */
+const launchOf = (list: Playlist): Launch => ({ playlistId: list.playlistId, title: list.title, subtitle: list.subtitle, thumbnail: list.thumbnail });
 
 function readRecent(): string[] {
   try {
@@ -89,6 +121,9 @@ export function MusicWindow() {
   const [search, setSearch] = useState<SearchState>({ query: "", kind: "songs", songs: null, artists: null, albums: null, loading: false });
   const [artist, setArtist] = useState<{ id: string; preview: Artist; page: ArtistPage | null } | null>(null);
   const [album, setAlbum] = useState<{ id: string; preview: Album; page: AlbumPage | null } | null>(null);
+  /** Paroles du titre affiché dans la vue Paroles (`entry` absent : en cours de lecture). */
+  const [lyrics, setLyrics] = useState<{ id: string; entry?: LyricsEntry } | null>(null);
+  const [launches, setLaunches] = useState<Launch[]>(readLaunches);
   const [screen, setScreen] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [miniH, setMiniH] = useState(520);
   const [moving, setMoving] = useState<{ left: number; top: number } | null>(null);
@@ -121,6 +156,9 @@ export function MusicWindow() {
         setView("mini");
         setDetail(null);
         setArtist(null);
+        // sans cela, la fiche d'album quittée à la fermeture revenait à la place de la recherche
+        setAlbum(null);
+        setLaunches(readLaunches());
         setOpen(true);
         sound.play("open");
       }),
@@ -131,6 +169,7 @@ export function MusicWindow() {
 
   const n = state?.now ?? null;
   const youtube = n?.source === "youtube";
+  const hasTrack = !!n;
 
   // position à l'instant présent, lue à chaque image par les barres (aucun re-rendu)
   const stateRef = useRef(state);
@@ -146,6 +185,40 @@ export function MusicWindow() {
       alive = false;
     };
   }, [youtube, n?.id]);
+
+  // paroles : lues quand la vue est ouverte, à chaque nouveau titre ; gardées par titre
+  const lyricsFor = view === "lyrics" && youtube && n?.id ? n.id : null;
+  useEffect(() => {
+    if (!lyricsFor) return;
+    const id = lyricsFor;
+    if (cachedLyrics.has(id)) return setLyrics({ id, entry: cachedLyrics.get(id) });
+    setLyrics({ id });
+    let alive = true;
+    music.lyrics(id).then(
+      (found) => {
+        cachedLyrics.set(id, found);
+        if (alive) setLyrics({ id, entry: found });
+      },
+      (e) => {
+        // un pont plus ancien (plugin 1.0.2) ne connaît pas la commande : on le dit, sans réessayer
+        const entry: LyricsEntry = e === "commande-inconnue" ? "old" : "error";
+        if (entry === "old") cachedLyrics.set(id, entry);
+        if (alive) setLyrics({ id, entry });
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [lyricsFor]);
+
+  const lyricsReady = view === "lyrics" && !!lyricsFor && lyrics?.id === lyricsFor && lyrics.entry !== undefined;
+
+  // un message d'erreur ne reste pas affiché indéfiniment
+  useEffect(() => {
+    if (!error) return;
+    const t = window.setTimeout(() => setError(null), 4500);
+    return () => window.clearTimeout(t);
+  }, [error]);
 
   // playlists : chargées à la première ouverture de la vue
   useEffect(() => {
@@ -211,7 +284,9 @@ export function MusicWindow() {
     if (!open) return;
     const t = window.setTimeout(() => input.focusInitial(), 260);
     return () => window.clearTimeout(t);
-  }, [view, detail?.list.id, artist?.id, album?.id, open]);
+    // les paroles arrivent après la vue : le focus se pose sur elles dès qu'elles sont là ;
+    // de même quand le lecteur laisse la place au démarrage rapide (plus rien ne joue), ou l'inverse
+  }, [view, detail?.list.id, artist?.id, album?.id, open, lyricsReady, hasTrack]);
 
   // Retour : fiche → liste → mini-lecteur → fermeture (ou retour au jeu)
   useEffect(
@@ -246,11 +321,13 @@ export function MusicWindow() {
   useEffect(
     () =>
       input.onTab((d) => {
-        const i = ORDER.indexOf(view) + d;
+        let i = ORDER.indexOf(view) + d;
+        // sans titre YouTube Music en cours, « À suivre » et « Paroles » n'ont rien à montrer : on les saute
+        while (i > 0 && i < ORDER.length && NEEDS_TRACK.includes(ORDER[i]) && !youtube) i += d;
         if (i < 0 || i >= ORDER.length || (i > 0 && !state?.youtube)) return "quiet";
         go(ORDER[i]);
       }),
-    [go, state?.youtube, view],
+    [go, state?.youtube, view, youtube],
   );
 
   const act = useCallback(async (action: MusicAction, value?: number) => {
@@ -266,11 +343,16 @@ export function MusicWindow() {
     }
   }, []);
 
-  const play = useCallback(async (item: { videoId?: string; playlistId?: string; index?: number }) => {
+  const play = useCallback(async (item: { videoId?: string; playlistId?: string; index?: number }, memo?: Launch) => {
     sound.play("select");
     setError(null);
     try {
       await music.play(item);
+      // une playlist ou un album lancé sera proposé la prochaine fois que rien ne joue
+      if (memo) {
+        saveLaunch(memo);
+        setLaunches(readLaunches());
+      }
       // retour au mini-lecteur : le titre lancé s'y affiche
       setDir(-1);
       setView("mini");
@@ -335,10 +417,15 @@ export function MusicWindow() {
         window.dispatchEvent(new CustomEvent("ibox:pad-keyboard", { detail: el }));
         return;
       }
-      // éléments réglables (volume, position) : gauche / droite les règlent
+      // éléments réglables (volume, position) : gauche / droite les règlent ; les paroles
+      // défilent avec haut / bas (et rendent la main arrivées au bout)
       const capture = el?.closest<HTMLElement>("[data-nav-capture]")?.dataset.navCapture ?? "";
       if ((a === "left" || a === "right") && capture.includes("x")) {
         el?.dispatchEvent(new KeyboardEvent("keydown", { key: a === "left" ? "ArrowLeft" : "ArrowRight", bubbles: true }));
+        return;
+      }
+      if ((a === "up" || a === "down") && capture.includes("y")) {
+        el?.dispatchEvent(new KeyboardEvent("keydown", { key: a === "up" ? "ArrowUp" : "ArrowDown", bubbles: true }));
         return;
       }
       if (a === "x") {
@@ -347,13 +434,36 @@ export function MusicWindow() {
       }
       if (a === "y") {
         if (view === "mini" && youtube) void act("like");
-        else if (detail) void play({ playlistId: detail.list.playlistId });
+        else if (detail) void play({ playlistId: detail.list.playlistId }, launchOf(detail.list));
         return;
       }
       const map: Record<string, Parameters<typeof input.dispatch>[0]> = { up: "up", down: "down", left: "left", right: "right", ok: "confirm", back: "back", lb: "tabPrev", rb: "tabNext" };
       if (map[a]) input.dispatch(map[a]);
     });
     return () => void off.then((f) => f());
+  }, [act, detail, n, play, view, youtube]);
+
+  // clavier : les mêmes gestes qu'à la manette (X : lecture / pause, F : j'aime ou lire la
+  // playlist), plus Espace, comme dans tout lecteur
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || !e.isTrusted) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+      const key = e.key.toLowerCase();
+      if (key === "x" || (key === " " && !(el instanceof HTMLButtonElement))) {
+        if (!n) return;
+        e.preventDefault();
+        void act("toggle");
+      } else if (key === "f") {
+        if (view === "mini" && youtube) void act("like");
+        else if (detail) void play({ playlistId: detail.list.playlistId }, launchOf(detail.list));
+        else return;
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [act, detail, n, play, view, youtube]);
 
   const tint = useDominantColor(n?.artwork ?? null);
@@ -427,11 +537,15 @@ export function MusicWindow() {
                 <Fade key="mini" dir={dir}>
                   <div ref={measureMini} className="flex flex-col p-5">
                     <Header app={n?.app ?? null} playing={!!n?.playing} onClose={close} onMove={startMove} />
-                    {n ? <Player n={n} tint={tint} live={live} onSeek={(ms) => void act("seek", ms)} act={act} /> : <Empty youtube={!!state?.youtube} loading={!state} />}
+                    {n ? (
+                      <Player n={n} tint={tint} live={live} onSeek={(ms) => void act("seek", ms)} act={act} />
+                    ) : (
+                      <Empty youtube={!!state?.youtube} loading={!state} launches={launches} onPlay={(l) => void play({ playlistId: l.playlistId }, l.playlistId === LIKED_ID ? undefined : l)} />
+                    )}
                     {state?.youtube && (
-                      <div className="mt-4 grid grid-cols-3 gap-2">
+                      <div className="mt-4 grid grid-cols-4 gap-2">
                         {TABS.map((t, i) => (
-                          <Tile key={t.value} view={t.value} label={t.label} tone={t.tone} index={i} onClick={() => go(t.value)} disabled={t.value === "queue" && !youtube} />
+                          <Tile key={t.value} view={t.value} label={t.label} tone={t.tone} index={i} onClick={() => go(t.value)} disabled={NEEDS_TRACK.includes(t.value) && !youtube} />
                         ))}
                       </div>
                     )}
@@ -455,12 +569,19 @@ export function MusicWindow() {
                       <AnimatePresence mode="wait" initial={false} custom={dir}>
                         <Fade key={contentKey} dir={dir} fill>
                           {view === "queue" ? (
-                            <QueueList items={upNext(queue, 50)} current={n} onPlay={(q) => void play({ videoId: q.videoId, playlistId: q.playlistId ?? undefined, index: q.index ?? undefined })} />
+                            <QueueList
+                              items={upNext(queue, 50)}
+                              current={n}
+                              onPlay={(q) => void play({ videoId: q.videoId, playlistId: q.playlistId ?? undefined, index: q.index ?? undefined })}
+                              onRadio={youtube && n ? () => void play({ videoId: n.id, playlistId: radioOf(n.id) }) : undefined}
+                            />
+                          ) : view === "lyrics" ? (
+                            <LyricsView entry={youtube && n && lyrics?.id === n.id ? lyrics.entry : undefined} hasTrack={youtube && !!n} trackKey={n?.id ?? ""} durationMs={n?.durationMs ?? 0} live={live} />
                           ) : view === "search" ? (
                             album ? (
                               <AlbumDetail album={album} current={n} onPlay={play} />
                             ) : artist ? (
-                              <ArtistDetail artist={artist} current={n} onPlay={(t) => void play({ videoId: t.videoId })} />
+                              <ArtistDetail artist={artist} current={n} onPlay={(t) => void play({ videoId: t.videoId })} onRadio={(t) => void play({ videoId: t.videoId, playlistId: radioOf(t.videoId) })} />
                             ) : (
                               <Search
                                 search={search}
@@ -735,6 +856,12 @@ function ViewIcon({ view, size }: { view: Tab; size: number }) {
           <path d="M3 6h12M3 12h12M3 18h7" />
           <path d="M15 15.5v6l5-3z" fill="currentColor" />
         </>
+      ) : view === "lyrics" ? (
+        // micro : les paroles, pour chanter avec
+        <>
+          <rect x="9" y="3" width="6" height="11" rx="3" />
+          <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" />
+        </>
       ) : (
         <>
           <circle cx="10.5" cy="10.5" r="6.5" />
@@ -773,7 +900,7 @@ function IconTabs<T extends string>({ value, onChange, items, small }: { value: 
             {active && (
               <motion.span
                 layoutId={id}
-                transition={reduced() ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 36 }}
+                transition={reduced() ? { duration: 0 } : SPRING.snappy}
                 className="absolute inset-0 rounded-full bg-[color-mix(in_srgb,var(--tone)_55%,transparent)] shadow-[inset_0_-3px_0_color-mix(in_srgb,var(--tone)_60%,transparent)]"
               />
             )}
@@ -801,7 +928,7 @@ function Player({ n, tint, live, onSeek, act }: {
         className="relative size-[208px] overflow-hidden rounded-[1.6rem] bg-black/30 ring-1 ring-white/15"
         style={{ boxShadow: `0 22px 50px -18px ${tint}` }}
         animate={reduced() ? undefined : { scale: n.playing ? 1 : 0.96 }}
-        transition={{ type: "spring", stiffness: 260, damping: 26 }}
+        transition={SPRING.smooth}
       >
         <AnimatePresence initial={false}>
           <motion.div key={n.id} initial={{ opacity: 0, scale: 1.06 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.45, ease: EASE }} className="absolute inset-0">
@@ -845,7 +972,7 @@ function Player({ n, tint, live, onSeek, act }: {
             className="ibox-focusable ibox-btn ibox-btn-primary grid size-14 place-items-center rounded-full [--ring-radius:999px]"
           >
             <AnimatePresence mode="wait" initial={false}>
-              <motion.svg key={n.playing ? "pause" : "play"} width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={{ duration: 0.14 }}>
+              <motion.svg key={n.playing ? "pause" : "play"} width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={TWEEN.micro}>
                 {n.playing ? (
                   <>
                     <rect x="6" y="5" width="4" height="14" rx="1.4" fill="currentColor" />
@@ -898,7 +1025,7 @@ function Heart({ liked, onClick }: { liked: boolean; onClick: () => void }) {
         key={String(liked)}
         initial={liked && !reduced() ? { scale: 0.3 } : false}
         animate={{ scale: [null, 1.25, 1] }}
-        transition={{ type: "spring", stiffness: 520, damping: 12 }}
+        transition={SPRING.pop}
         width="18"
         height="18"
         viewBox="0 0 24 24"
@@ -955,7 +1082,7 @@ function Toggle({ label, active, hidden, badge, onClick, children }: { label: st
       </svg>
       <AnimatePresence>
         {badge && (
-          <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }} transition={{ type: "spring", stiffness: 520, damping: 18 }} className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-[var(--accent)] text-[0.6rem] font-extrabold text-[var(--ibox-on-accent)]">
+          <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }} transition={SPRING.pop} className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-[var(--accent)] text-[0.6rem] font-extrabold text-[var(--ibox-on-accent)]">
             {badge}
           </motion.span>
         )}
@@ -1029,7 +1156,7 @@ function VolumeBar({ value, onChange }: { value: number; onChange: (v: number) =
   const end = () => {
     if (pending.current != null) send(pending.current, true);
     // l'élastique revient en rebondissant
-    void animate(stretch, 1, { type: "spring", stiffness: 520, damping: 11 });
+    void animate(stretch, 1, SPRING.pop);
     release.current = window.setTimeout(() => setLocal(null), 900);
   };
   const onKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1076,7 +1203,7 @@ function VolumeBar({ value, onChange }: { value: number; onChange: (v: number) =
           style={{ left: knob }}
           initial={knock ? { scale: 1.5 } : false}
           animate={{ scale: 1 }}
-          transition={{ type: "spring", stiffness: 520, damping: 14 }}
+          transition={SPRING.pop}
         />
       </div>
       <span aria-hidden="true" className="w-[18px] flex-none" />
@@ -1102,12 +1229,12 @@ function Speaker({ level, knock }: { level: number; knock: number }) {
       aria-hidden="true"
       initial={knock && !reduced() ? { rotate: -12 } : false}
       animate={{ rotate: [null, 10, -6, 0] }}
-      transition={{ duration: 0.45 }}
+      transition={TWEEN.base}
     >
       <path d="M11 5L6 9H2v6h4l5 4z" fill="currentColor" fillOpacity={0.25} />
-      <motion.path d="M15.5 8.5a5 5 0 0 1 0 7" animate={{ opacity: waves >= 1 ? 1 : 0, pathLength: waves >= 1 ? 1 : 0 }} transition={{ duration: 0.2 }} />
-      <motion.path d="M18.5 5.5a9 9 0 0 1 0 13" animate={{ opacity: waves >= 2 ? 1 : 0, pathLength: waves >= 2 ? 1 : 0 }} transition={{ duration: 0.2 }} />
-      <motion.path d="M16 9.5l5 5M21 9.5l-5 5" animate={{ opacity: waves === 0 ? 1 : 0 }} transition={{ duration: 0.15 }} />
+      <motion.path d="M15.5 8.5a5 5 0 0 1 0 7" animate={{ opacity: waves >= 1 ? 1 : 0, pathLength: waves >= 1 ? 1 : 0 }} transition={TWEEN.fast} />
+      <motion.path d="M18.5 5.5a9 9 0 0 1 0 13" animate={{ opacity: waves >= 2 ? 1 : 0, pathLength: waves >= 2 ? 1 : 0 }} transition={TWEEN.fast} />
+      <motion.path d="M16 9.5l5 5M21 9.5l-5 5" animate={{ opacity: waves === 0 ? 1 : 0 }} transition={TWEEN.micro} />
     </motion.svg>
   );
 }
@@ -1266,7 +1393,7 @@ function Card({ list, index, onClick }: { list: Playlist; index: number; onClick
 function DetailHeader({ image, round, title, subtitle, onPlay, playLabel }: { image: string | null; round?: boolean; title: string; subtitle?: string; onPlay: () => void; playLabel: string }) {
   return (
     <div className="flex items-center gap-4">
-      <motion.div initial={reduced() ? false : { scale: 0.85, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: "spring", stiffness: 320, damping: 26 }} className={`size-20 flex-none overflow-hidden ring-1 ring-white/10 ${round ? "rounded-full" : "rounded-2xl"}`}>
+      <motion.div initial={reduced() ? false : { scale: 0.85, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={SPRING.smooth} className={`size-20 flex-none overflow-hidden ring-1 ring-white/10 ${round ? "rounded-full" : "rounded-2xl"}`}>
         <Thumb src={image} fill />
       </motion.div>
       <div className="min-w-0 flex-1">
@@ -1280,11 +1407,13 @@ function DetailHeader({ image, round, title, subtitle, onPlay, playLabel }: { im
   );
 }
 
-function PlaylistDetail({ detail, current, onPlay }: { detail: { list: Playlist; tracks: Track[] | null }; current: MusicState["now"]; onPlay: (i: { videoId?: string; playlistId?: string; index?: number }) => void }) {
+type PlayItem = (i: { videoId?: string; playlistId?: string; index?: number }, memo?: Launch) => void;
+
+function PlaylistDetail({ detail, current, onPlay }: { detail: { list: Playlist; tracks: Track[] | null }; current: MusicState["now"]; onPlay: PlayItem }) {
   const { list, tracks } = detail;
   return (
     <>
-      <DetailHeader image={list.thumbnail} title={list.title} subtitle={list.subtitle} playLabel="Lire la playlist" onPlay={() => onPlay({ playlistId: list.playlistId })} />
+      <DetailHeader image={list.thumbnail} title={list.title} subtitle={list.subtitle} playLabel="Lire la playlist" onPlay={() => onPlay({ playlistId: list.playlistId }, launchOf(list))} />
       <Scroll>
         <div className="mt-2 flex flex-col gap-0.5">
           {tracks === null ? (
@@ -1293,7 +1422,7 @@ function PlaylistDetail({ detail, current, onPlay }: { detail: { list: Playlist;
             <p className="py-6 text-center text-[0.9rem] font-bold text-white/55">Aucun titre à afficher.</p>
           ) : (
             tracks.map((t, i) => (
-              <Row key={t.videoId} index={i} title={t.title} artist={t.artist} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => onPlay({ videoId: t.videoId, playlistId: list.playlistId, index: i })} />
+              <Row key={t.videoId} index={i} title={t.title} artist={t.artist} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => onPlay({ videoId: t.videoId, playlistId: list.playlistId, index: i }, launchOf(list))} />
             ))
           )}
         </div>
@@ -1302,12 +1431,13 @@ function PlaylistDetail({ detail, current, onPlay }: { detail: { list: Playlist;
   );
 }
 
-function ArtistDetail({ artist, current, onPlay }: { artist: { preview: Artist; page: ArtistPage | null }; current: MusicState["now"]; onPlay: (t: Track) => void }) {
+function ArtistDetail({ artist, current, onPlay, onRadio }: { artist: { preview: Artist; page: ArtistPage | null }; current: MusicState["now"]; onPlay: (t: Track) => void; onRadio: (t: Track) => void }) {
   const page = artist.page;
   const tracks = page?.tracks ?? null;
   return (
     <>
-      <DetailHeader image={page?.thumbnail ?? artist.preview.thumbnail} round title={page?.name || artist.preview.name} subtitle={artist.preview.subtitle} playLabel="Lire les titres populaires" onPlay={() => tracks?.[0] && onPlay(tracks[0])} />
+      {/* le gros bouton lance le titre le plus populaire, puis la radio qui en découle : la musique ne s'arrête pas au bout d'un titre */}
+      <DetailHeader image={page?.thumbnail ?? artist.preview.thumbnail} round title={page?.name || artist.preview.name} subtitle={artist.preview.subtitle} playLabel="Lancer la radio de l’artiste" onPlay={() => tracks?.[0] && onRadio(tracks[0])} />
       <Scroll>
         <div className="mt-2 flex flex-col gap-0.5">
           {tracks === null ? (
@@ -1328,14 +1458,14 @@ function albumLine(a: { artist: string; year: string | null; type?: string | nul
   return [a.type, a.artist, a.year].filter(Boolean).join(" • ");
 }
 
-function AlbumDetail({ album, current, onPlay }: { album: { preview: Album; page: AlbumPage | null }; current: MusicState["now"]; onPlay: (i: { videoId?: string; playlistId?: string; index?: number }) => void }) {
+function AlbumDetail({ album, current, onPlay }: { album: { preview: Album; page: AlbumPage | null }; current: MusicState["now"]; onPlay: PlayItem }) {
   const page = album.page;
   const tracks = page?.tracks ?? null;
   const list = page?.playlistId ?? undefined;
   // dans la liste de lecture de l'album quand on la connaît : la suite s'enchaîne dans l'ordre
   const playAt = (i: number) => {
     const t = tracks?.[i];
-    if (list) onPlay({ videoId: t?.videoId, playlistId: list, index: i });
+    if (list) onPlay({ videoId: t?.videoId, playlistId: list, index: i }, { playlistId: list, title: page?.title || album.preview.title, subtitle: page?.artist || album.preview.artist, thumbnail: page?.thumbnail ?? album.preview.thumbnail });
     else if (t) onPlay({ videoId: t.videoId });
   };
   return (
@@ -1356,16 +1486,133 @@ function AlbumDetail({ album, current, onPlay }: { album: { preview: Album; page
   );
 }
 
-function QueueList({ items, current, onPlay }: { items: QueueItem[]; current: MusicState["now"]; onPlay: (q: QueueItem) => void }) {
-  if (!items.length) return <p className="py-10 text-center text-[0.9rem] font-bold text-white/55">Rien à suivre pour l’instant.</p>;
+function QueueList({ items, current, onPlay, onRadio }: { items: QueueItem[]; current: MusicState["now"]; onPlay: (q: QueueItem) => void; onRadio?: () => void }) {
+  // radio du titre en cours : YouTube Music compose une suite sans fin de titres proches
+  const radio = onRadio && (
+    <motion.button
+      type="button"
+      data-focusable
+      data-autofocus={!items.length || undefined}
+      whileTap={{ scale: 0.97 }}
+      onClick={onRadio}
+      title="Remplace la file par des titres proches de celui-ci, sans fin"
+      className="ibox-focusable tone-green flex w-full items-center gap-3 rounded-2xl bg-[color-mix(in_srgb,var(--tone)_26%,transparent)] p-2 pr-4 text-left shadow-[inset_0_-3px_0_color-mix(in_srgb,var(--tone)_40%,transparent)] transition-colors [--ring-radius:1rem] hover:bg-[color-mix(in_srgb,var(--tone)_38%,transparent)]"
+    >
+      <span className="grid size-11 flex-none place-items-center rounded-xl bg-white/12">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="2.2" fill="currentColor" />
+          <path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2" />
+        </svg>
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[0.9rem] font-bold">Radio de ce titre</span>
+        <span className="block truncate text-[0.78rem] font-bold text-white/55">Des titres proches, à la suite, sans fin</span>
+      </span>
+    </motion.button>
+  );
   return (
     <Scroll>
       <div className="flex flex-col gap-0.5">
-        {items.map((q, i) => (
-          <Row key={q.videoId} index={i} first={i === 0} title={q.title} artist={q.artist} duration={q.duration} thumbnail={q.thumbnail} current={current?.id === q.videoId} onClick={() => onPlay(q)} />
-        ))}
+        {radio}
+        {items.length === 0 ? (
+          <p className="py-8 text-center text-[0.9rem] font-bold text-white/55">Rien à suivre pour l’instant.</p>
+        ) : (
+          items.map((q, i) => <Row key={q.videoId} index={i} first={i === 0 && !radio} title={q.title} artist={q.artist} duration={q.duration} thumbnail={q.thumbnail} current={current?.id === q.videoId} onClick={() => onPlay(q)} />)
+        )}
       </div>
     </Scroll>
+  );
+}
+
+/**
+ * Paroles du titre en cours. Le texte suit doucement l'avancée du titre (un repère, pas un
+ * karaoké : YouTube Music ne donne pas l'heure de chaque ligne) ; dès qu'on fait défiler
+ * soi-même, à la molette, au clavier ou à la manette, le suivi attend quelques secondes.
+ */
+function LyricsView({ entry, hasTrack, trackKey, durationMs, live }: { entry: LyricsEntry | undefined; hasTrack: boolean; trackKey: string; durationMs: number; live: () => number }) {
+  const box = useRef<HTMLDivElement>(null);
+  const hold = useRef(0);
+  const found = entry && typeof entry === "object" ? entry : null;
+
+  // nouveau titre : on repart du haut, suivi actif
+  useEffect(() => {
+    hold.current = 0;
+    box.current?.scrollTo({ top: 0 });
+  }, [trackKey]);
+
+  useAnimationFrame(() => {
+    const el = box.current;
+    if (!el || !found || Date.now() < hold.current) return;
+    const max = el.scrollHeight - el.clientHeight;
+    if (max <= 0) return;
+    const target = max * lyricsProgress(live(), durationMs);
+    const d = target - el.scrollTop;
+    if (Math.abs(d) < 0.5) return;
+    el.scrollTop += reduced() ? d : d * 0.05;
+  });
+
+  const pause = () => {
+    hold.current = Date.now() + 8000;
+  };
+  const onKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const dir = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+    const el = box.current;
+    if (!dir || !el) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const max = el.scrollHeight - el.clientHeight;
+    // arrivé au bout (ou texte court) : la navigation reprend la main, vers les onglets
+    if (max <= 0 || (dir < 0 && el.scrollTop <= 0) || (dir > 0 && el.scrollTop >= max - 1)) {
+      input.move(dir < 0 ? "up" : "down");
+      return;
+    }
+    pause();
+    el.scrollBy({ top: dir * 96, behavior: reduced() ? "instant" : "smooth" });
+  };
+
+  if (!hasTrack) return <LyricsNote title="Aucun titre en cours" body="Lancez un titre sur YouTube Music : ses paroles s’afficheront ici." />;
+  if (entry === undefined) return <Loading />;
+  if (entry === "old") return <LyricsNote title="Paroles indisponibles" body="Mettez à jour le plugin Music in the Box (Paramètres › Plugins) pour afficher les paroles." />;
+  if (entry === "error") return <LyricsNote title="Paroles indisponibles" body="YouTube Music n’a pas répondu. Réessayez dans un instant." />;
+  if (!found) return <LyricsNote title="Pas de paroles pour ce titre" body="YouTube Music n’en propose pas : c’est souvent le cas des morceaux instrumentaux." />;
+
+  const fade = "linear-gradient(180deg, transparent, #000 7%, #000 90%, transparent)";
+  return (
+    <div
+      ref={box}
+      tabIndex={0}
+      data-focusable
+      data-autofocus
+      data-nav-capture="y"
+      role="document"
+      aria-label="Paroles"
+      onKeyDown={onKey}
+      onWheel={pause}
+      onPointerDown={pause}
+      className="ibox-focusable -mx-2 min-h-0 flex-1 overflow-y-auto rounded-2xl px-4 py-6 text-center outline-none [--ring-radius:1rem] [scrollbar-width:none]"
+      style={{ maskImage: fade, WebkitMaskImage: fade }}
+    >
+      {/* texte venu de YouTube Music : jamais traduit par iBox */}
+      <div data-no-i18n className="flex flex-col gap-1.5">
+        {found.lines.map((line, i) =>
+          line ? (
+            <p key={i} className="font-display text-[1.12rem] leading-snug font-semibold text-white/90">{line}</p>
+          ) : (
+            <span key={i} aria-hidden="true" className="h-4" />
+          ),
+        )}
+      </div>
+      {found.source && <p data-no-i18n className="mt-8 text-[0.72rem] font-bold text-white/40">{found.source}</p>}
+    </div>
+  );
+}
+
+function LyricsNote({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+      <div className="font-display text-[1.1rem] font-semibold">{title}</div>
+      <p className="text-[0.88rem] font-bold text-white/55">{body}</p>
+    </div>
   );
 }
 
@@ -1548,15 +1795,67 @@ function Loading({ grid }: { grid?: boolean }) {
   );
 }
 
-function Empty({ youtube, loading }: { youtube: boolean; loading: boolean }) {
+/**
+ * Rien ne joue. Compte YouTube Music connu : démarrage rapide, une pression suffit pour
+ * relancer ses titres aimés ou ce qu'on écoutait la dernière fois. Sinon : la connexion.
+ */
+function Empty({ youtube, loading, launches, onPlay }: { youtube: boolean; loading: boolean; launches: Launch[]; onPlay: (l: Launch) => void }) {
+  if (loading || !youtube) {
+    return (
+      <div className="mt-4 flex flex-col items-center gap-3 rounded-2xl bg-white/6 px-4 py-6 text-center">
+        <div className="font-display text-[1.1rem] font-semibold">{loading ? "Chargement…" : "Aucune musique en cours"}</div>
+        {!loading && (
+          <button type="button" data-focusable data-autofocus onClick={() => void music.connect()} className="ibox-focusable ibox-btn ibox-btn-primary h-11 rounded-full px-5 text-[0.92rem] font-bold [--ring-radius:999px] active:scale-95">
+            Connecter YouTube Music
+          </button>
+        )}
+      </div>
+    );
+  }
+  const liked: Launch = { playlistId: LIKED_ID, title: "Titres aimés", subtitle: "Tout ce que vous avez aimé, à la suite", thumbnail: null };
   return (
-    <div className="mt-4 flex flex-col items-center gap-3 rounded-2xl bg-white/6 px-4 py-6 text-center">
-      <div className="font-display text-[1.1rem] font-semibold">{loading ? "Chargement…" : "Aucune musique en cours"}</div>
-      {!loading && (
-        <button type="button" data-focusable data-autofocus onClick={() => void music.connect()} className="ibox-focusable ibox-btn ibox-btn-primary h-11 rounded-full px-5 text-[0.92rem] font-bold [--ring-radius:999px] active:scale-95">
-          {youtube ? "Ouvrir YouTube Music" : "Connecter YouTube Music"}
-        </button>
-      )}
+    <div className="mt-3 flex flex-col gap-1.5" data-nav-group="music-quickstart">
+      <div className="px-1 pb-1">
+        <div className="font-display text-[1.15rem] font-semibold">Que voulez-vous écouter ?</div>
+        <div className="text-[0.8rem] font-bold text-white/50">Aucune musique en cours</div>
+      </div>
+      {[liked, ...launches.filter((l) => l.playlistId !== LIKED_ID)].map((l, i) => (
+        <motion.button
+          key={l.playlistId}
+          type="button"
+          data-focusable
+          data-autofocus={i === 0 || undefined}
+          {...rise(i)}
+          whileTap={{ scale: 0.97 }}
+          onClick={() => onPlay(l)}
+          className="ibox-focusable group flex w-full items-center gap-3 rounded-2xl bg-white/8 p-2 pr-3 text-left transition-colors [--ring-radius:1rem] hover:bg-white/14"
+        >
+          {i === 0 ? (
+            <span className="tone-pink grid size-12 flex-none place-items-center rounded-xl bg-[color-mix(in_srgb,var(--tone)_45%,transparent)] shadow-[inset_0_-3px_0_color-mix(in_srgb,var(--tone)_50%,transparent)]">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="#ffd0e2" stroke="#ffd0e2" strokeWidth="2" strokeLinejoin="round" aria-hidden="true">
+                <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.6 1-1.1a5.5 5.5 0 0 0 0-7.7z" />
+              </svg>
+            </span>
+          ) : (
+            <Thumb src={l.thumbnail} size={48} />
+          )}
+          <span className="min-w-0 flex-1">
+            {/* le nom d'une playlist ou d'un album vient de YouTube Music : jamais traduit */}
+            <span data-no-i18n={i > 0 || undefined} className="block truncate text-[0.92rem] font-bold">{l.title}</span>
+            {i === 0 || !l.subtitle ? (
+              <span className="block truncate text-[0.78rem] font-bold text-white/50">{i === 0 ? l.subtitle : "Écouté récemment"}</span>
+            ) : (
+              <span data-no-i18n className="block truncate text-[0.78rem] font-bold text-white/50">{l.subtitle}</span>
+            )}
+          </span>
+          <span className="grid size-9 flex-none place-items-center rounded-full bg-white/10 transition-colors group-hover:bg-white/20">
+            <Icon name="play" size="0.95rem" />
+          </span>
+        </motion.button>
+      ))}
+      <button type="button" data-focusable onClick={() => void music.connect()} className="ibox-focusable mt-1 h-9 self-center rounded-full px-4 text-[0.8rem] font-bold text-white/55 [--ring-radius:999px] hover:bg-white/10 hover:text-white">
+        Ouvrir YouTube Music
+      </button>
     </div>
   );
 }
@@ -1572,6 +1871,7 @@ function LiveProgress({ live, durationMs, canSeek, trackKey, onSeek, compact }: 
   const knob = useRef<HTMLDivElement>(null);
   const time = useRef<HTMLSpanElement>(null);
   const range = useRef<HTMLInputElement>(null);
+  const slider = useRef<HTMLDivElement>(null);
   const shown = useRef<number | null>(null);
   const dragging = useRef<number | null>(null);
   const hold = useRef(0);
@@ -1592,18 +1892,38 @@ function LiveProgress({ live, durationMs, canSeek, trackKey, onSeek, compact }: 
     if (knob.current) knob.current.style.left = `${r * 100}%`;
     if (time.current) {
       const t = formatTime(v);
-      if (time.current.textContent !== t) time.current.textContent = t;
+      if (time.current.textContent !== t) {
+        time.current.textContent = t;
+        // lecteurs d'écran : la position annoncée suit, seconde par seconde
+        slider.current?.setAttribute("aria-valuenow", String(Math.round(v / 1000)));
+        slider.current?.setAttribute("aria-valuetext", t);
+      }
     }
     if (range.current && dragging.current == null) range.current.value = String(Math.round(r * 1000));
   });
 
   const commit = () => {
+    window.clearTimeout(nudge.current);
     if (dragging.current == null) return;
     onSeek?.(dragging.current);
     shown.current = dragging.current;
     dragging.current = null;
     // le lecteur applique le déplacement : on garde la nouvelle position un instant
     hold.current = Date.now() + 600;
+  };
+
+  // clavier et manette : ← → reculent ou avancent de cinq secondes. Plusieurs appuis de suite
+  // s'additionnent à l'écran et ne font qu'un seul déplacement, envoyé dès qu'on s'arrête.
+  const nudge = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(nudge.current), []);
+  const onKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const steps = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!steps || !canSeek || durationMs <= 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragging.current = seekBy(dragging.current ?? shown.current ?? live(), steps, durationMs);
+    window.clearTimeout(nudge.current);
+    nudge.current = window.setTimeout(commit, 420);
   };
 
   if (compact) {
@@ -1615,15 +1935,30 @@ function LiveProgress({ live, durationMs, canSeek, trackKey, onSeek, compact }: 
   }
   return (
     <>
-      <div className="group relative flex h-5 items-center">
+      <div
+        // atteignable au clavier et à la manette, comme le volume (la glissière à la souris reste dessous)
+        tabIndex={canSeek ? 0 : undefined}
+        data-focusable={canSeek || undefined}
+        data-nav-capture="x"
+        role="slider"
+        aria-label="Position dans le titre"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(durationMs / 1000)}
+        aria-valuenow={0}
+        aria-disabled={!canSeek}
+        ref={slider}
+        onKeyDown={onKey}
+        className="ibox-focusable group relative flex h-5 items-center rounded-full outline-none [--ring-radius:999px]"
+      >
         <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-white/12">
           <div ref={fill} className="absolute inset-0 origin-left rounded-full bg-[linear-gradient(90deg,var(--ibox-sky),var(--ibox-lavender))] will-change-transform" style={{ transform: "scaleX(0)" }} />
         </div>
-        <div ref={knob} aria-hidden="true" className="pointer-events-none absolute size-3.5 -translate-x-1/2 scale-0 rounded-full bg-white shadow transition-transform duration-200 group-hover:scale-100" style={{ left: "0%" }} />
+        <div ref={knob} aria-hidden="true" className="pointer-events-none absolute size-3.5 -translate-x-1/2 scale-0 rounded-full bg-white shadow transition-transform duration-200 group-hover:scale-100 group-focus-visible:scale-100" style={{ left: "0%" }} />
         <input
           ref={range}
           type="range"
-          aria-label="Position"
+          tabIndex={-1}
+          aria-hidden="true"
           min={0}
           max={1000}
           defaultValue={0}

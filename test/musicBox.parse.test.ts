@@ -174,6 +174,36 @@ describe("Music in the Box : réponses YouTube Music", () => {
     expect(q[0].artist).toBe("Artiste");
   });
 
+  it("trouve la page de paroles d'un titre et lit ses lignes", () => {
+    const P4 = P as unknown as { lyricsId: (j: unknown) => string | null; lyrics: (j: unknown) => { lines: string[]; source: string | null } | null };
+    // forme réelle des réponses de YouTube Music (novembre 2026) ; texte inventé, les vraies
+    // paroles n'ont pas leur place dans un dépôt
+    const tab = (title: string, browseId?: string, pageType?: string, unselectable?: boolean) => ({
+      tabRenderer: {
+        title,
+        ...(unselectable ? { unselectable: true } : {}),
+        ...(browseId ? { endpoint: { browseEndpoint: { browseId, browseEndpointContextSupportedConfigs: { browseEndpointContextMusicConfig: { pageType } } } } } : { content: {} }),
+      },
+    });
+    const next = (lyricsTab: object) => ({
+      contents: { singleColumnMusicWatchNextResultsRenderer: { tabbedRenderer: { watchNextTabbedResultsRenderer: { tabs: [tab("À suivre"), lyricsTab, tab("Similaires", "MPTRt_x", "MUSIC_PAGE_TYPE_TRACK_RELATED")] } } } },
+    });
+    expect(P4.lyricsId(next(tab("Paroles", "MPLYt_x", "MUSIC_PAGE_TYPE_TRACK_LYRICS")))).toBe("MPLYt_x");
+    // onglet grisé : YouTube Music n'a pas de paroles pour ce titre, même s'il garde une adresse
+    expect(P4.lyricsId(next(tab("Paroles", "MPLYt_x", "MUSIC_PAGE_TYPE_TRACK_LYRICS", true)))).toBeNull();
+    // jamais l'onglet « Similaires », et rien sans onglet
+    expect(P4.lyricsId(next(tab("Commentaires")))).toBeNull();
+    expect(P4.lyricsId({})).toBeNull();
+
+    const page = P4.lyrics({
+      contents: { sectionListRenderer: { contents: [{ musicDescriptionShelfRenderer: { description: { runs: [{ text: "Premier vers\r\nDeuxième vers \n\nNouveau couplet\n" }] }, footer: { runs: [{ text: "Source : Exemple" }] } } }] } },
+    });
+    expect(page).toEqual({ lines: ["Premier vers", "Deuxième vers", "", "Nouveau couplet"], source: "Source : Exemple" });
+    // « Paroles non disponibles » : un message, pas d'étagère de texte
+    expect(P4.lyrics({ contents: { messageRenderer: { text: { runs: [{ text: "Paroles non disponibles" }] } } } })).toBeNull();
+    expect(P4.lyrics({ contents: { sectionListRenderer: { contents: [{ musicDescriptionShelfRenderer: { description: { runs: [{ text: "  " }] } } }] } } })).toBeNull();
+  });
+
   // réponses réelles enregistrées : chaque titre a un identifiant, un titre et un artiste
   const fixtures = join(__dirname, "fixtures");
   const files = existsSync(fixtures) ? readdirSync(fixtures).filter((f) => f.endsWith(".json")) : [];

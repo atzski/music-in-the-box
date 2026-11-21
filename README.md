@@ -45,6 +45,11 @@ Sign in once with your Google account and the panel gives you your library: your
   <img src="docs/media/search.webp" width="32%" alt="Searching for Daft Punk: songs with their artists and durations">
 </p>
 
+- **Lyrics.** A fourth tab shows the words of the song that is playing; the text follows the song, and stops following as soon as you scroll it yourself.
+- **Radio.** From "Up next", start a radio from the current song: similar songs, one after another, endlessly. An artist's big play button does the same from their most popular song.
+- **Quick start.** When nothing is playing, the panel offers your liked songs and the last playlists and albums you started: one press and the music is on.
+- **Seek without a mouse.** The progress bar can be reached with the arrows or the D-pad, in five-second steps. On the keyboard, X or Space plays and pauses, F likes the song.
+
 Not using YouTube Music? The panel also drives whatever plays through Windows' media controls (Spotify, Deezer, a browser tab…): title, cover, play/pause, previous and next.
 
 ## Private by design

@@ -7,7 +7,7 @@
 
   var P = ytmParse;
   var results = {};
-  var VERSION = 2;
+  var VERSION = 3;
   /** Pages lues au plus pour une playlist (environ 100 titres par page). */
   var MAX_PAGES = 10;
 
@@ -169,11 +169,15 @@
 
   // « J'aime » du titre en cours : lu une fois par titre (réponse `next`), gardé ici.
   var likes = {}, likeLoading = null;
+  // Paroles : page de paroles par titre (lue dans la même réponse `next` que le « J'aime »
+  // quand elle est déjà passée), puis le texte lui-même, gardé par titre.
+  var lyricsPages = {}, lyricsCache = {};
   function refreshLike(videoId) {
     if (!videoId || videoId in likes || likeLoading === videoId) return;
     likeLoading = videoId;
     innertube('next', { videoId: videoId, isAudioOnly: true }).then(function (j) {
       likes[videoId] = P.likeStatus(j);
+      lyricsPages[videoId] = P.lyricsId(j);
     }, function () {}).then(function () { if (likeLoading === videoId) likeLoading = null; });
   }
 
@@ -281,6 +285,19 @@
       var list = p.getPlaylistId && p.getPlaylistId();
       if (list) body.playlistId = list;
       return P.queue(await innertube('next', body));
+    },
+    // paroles d'un titre (celui en cours par défaut) : {lines, source}, ou null quand YouTube
+    // Music n'en a pas. Gardées par titre : rouvrir l'onglet ne relance aucune requête.
+    lyrics: async function (a) {
+      var p = player();
+      var id = String((a && a.videoId) || (p && p.getVideoData ? p.getVideoData().video_id : '') || '');
+      if (!id) throw new Error('aucun-titre');
+      if (id in lyricsCache) return lyricsCache[id];
+      var page = id in lyricsPages ? lyricsPages[id] : P.lyricsId(await innertube('next', { videoId: id, isAudioOnly: true }));
+      lyricsPages[id] = page;
+      var out = page ? P.lyrics(await innertube('browse', { browseId: page })) : null;
+      lyricsCache[id] = out;
+      return out;
     },
     // {videoId} et/ou {playlistId}, {index} : position dans la playlist
     playItem: function (a) {

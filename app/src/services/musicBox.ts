@@ -91,6 +91,72 @@ export interface QueueItem {
   index: number | null;
 }
 
+/** Paroles d'un titre : une ligne vide sépare deux couplets. */
+export interface Lyrics {
+  lines: string[];
+  /** « Source : Musixmatch » : affichée telle que YouTube Music la donne. */
+  source: string | null;
+}
+
+/**
+ * Radio d'un titre : la liste sans fin que YouTube Music compose à partir de lui
+ * (le titre lui-même, puis des titres proches).
+ */
+export function radioOf(videoId: string): string {
+  return `RDAMVM${videoId}`;
+}
+
+/** Ce qu'on a lancé en dernier (playlist, album) : proposé quand rien ne joue. */
+export interface Launch {
+  playlistId: string;
+  title: string;
+  subtitle: string;
+  thumbnail: string | null;
+}
+
+/** Lancements gardés pour le démarrage rapide. */
+export const MAX_LAUNCHES = 3;
+
+/** Ajoute un lancement en tête, sans doublon ; les plus anciens sortent. */
+export function pushLaunch(list: Launch[], launch: Launch): Launch[] {
+  return [launch, ...list.filter((l) => l.playlistId !== launch.playlistId)].slice(0, MAX_LAUNCHES);
+}
+
+/** Lancements relus du stockage : tout ce qui n'a pas la bonne forme est écarté. */
+export function parseLaunches(raw: string | null): Launch[] {
+  try {
+    const v: unknown = JSON.parse(raw ?? "[]");
+    if (!Array.isArray(v)) return [];
+    return v
+      .filter((x): x is Launch => !!x && typeof x.playlistId === "string" && !!x.playlistId && typeof x.title === "string" && !!x.title)
+      .map((x) => ({ playlistId: x.playlistId, title: x.title, subtitle: typeof x.subtitle === "string" ? x.subtitle : "", thumbnail: typeof x.thumbnail === "string" ? x.thumbnail : null }))
+      .slice(0, MAX_LAUNCHES);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Où en est le défilement des paroles (0 à 1) pour une position dans le titre. YouTube Music
+ * ne donne pas l'heure de chaque ligne : on suppose une courte introduction et une fin
+ * instrumentale, et le texte avance régulièrement entre les deux. C'est un repère, pas un
+ * karaoké ; dès qu'on fait défiler soi-même, le suivi s'arrête.
+ */
+export function lyricsProgress(positionMs: number, durationMs: number): number {
+  if (!(durationMs > 0)) return 0;
+  const p = positionMs / durationMs;
+  return Math.max(0, Math.min(1, (p - 0.07) / 0.83));
+}
+
+/** Pas d'un déplacement dans le titre au clavier ou à la manette (ms). */
+export const SEEK_STEP_MS = 5000;
+
+/** Nouvelle position après `steps` pas (négatifs : en arrière), bornée au titre. */
+export function seekBy(positionMs: number, steps: number, durationMs: number): number {
+  const max = durationMs > 0 ? durationMs : Number.MAX_SAFE_INTEGER;
+  return Math.max(0, Math.min(max, Math.round(positionMs + steps * SEEK_STEP_MS)));
+}
+
 export interface MusicState {
   now: NowPlaying | null;
   /** Heure de l'instantané (ms) : la position avance d'elle-même entre deux lectures. */
@@ -156,6 +222,8 @@ export const music = {
   /** Une page de playlist (pont 1.0.1 et plus) : `next` à repasser pour la suivante. */
   playlistPage: (id: string, next?: PageToken | null) => ytm<{ tracks: Track[]; next: PageToken | null }>("playlistPage", next ? { next } : { id }),
   queue: () => ytm<QueueItem[]>("queue"),
+  /** Paroles d'un titre (pont 1.0.3 et plus) : null quand YouTube Music n'en a pas. */
+  lyrics: (videoId: string) => ytm<Lyrics | null>("lyrics", { videoId }),
   /** Lance un titre, une playlist, ou une playlist à partir d'un titre. */
   play: (item: { videoId?: string; playlistId?: string; index?: number }) => ytm<boolean>("playItem", item),
 };

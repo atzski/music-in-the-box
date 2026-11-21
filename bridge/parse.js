@@ -247,5 +247,30 @@ var ytmParse = (function () {
     return out;
   }
 
-  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue };
+  // Paroles, étape 1 (réponse `next`) : identifiant de la page de paroles du titre (MPLY…),
+  // ou null quand YouTube Music n'en a pas (onglet « Paroles » grisé, `unselectable`).
+  function lyricsId(json) {
+    var tabs = collect(json, 'tabRenderer');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i], b = t && t.endpoint && t.endpoint.browseEndpoint;
+      if (!b || t.unselectable) continue;
+      if (/TRACK_LYRICS/.test(pageType({ navigationEndpoint: t.endpoint })) || /^MPLY/.test(b.browseId || '')) return b.browseId;
+    }
+    return null;
+  }
+
+  // Paroles, étape 2 (réponse `browse` de cette page) : les lignes dans l'ordre (une ligne
+  // vide sépare deux couplets) et la source affichée par YouTube Music. null quand la page
+  // ne porte qu'un message (« Paroles non disponibles »).
+  function lyrics(json) {
+    var shelf = find(json, 'musicDescriptionShelfRenderer');
+    var body = shelf ? text(shelf.description).replace(/\r/g, '').trim() : '';
+    if (!body) return null;
+    return {
+      lines: body.split('\n').map(function (l) { return l.trim(); }),
+      source: text(shelf.footer).trim() || null
+    };
+  }
+
+  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue, lyricsId: lyricsId, lyrics: lyrics };
 })();

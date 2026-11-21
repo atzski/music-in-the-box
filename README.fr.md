@@ -45,6 +45,11 @@ Connectez votre compte Google une fois, et le panneau vous donne votre biblioth�
   <img src="docs/media/search.webp" width="32%" alt="Recherche de Daft Punk : titres, artistes et durées">
 </p>
 
+- **Paroles.** Un quatrième onglet affiche les paroles du titre en cours ; le texte suit le titre, et cesse de suivre dès que vous le faites défiler vous-même.
+- **Radio.** Depuis « À suivre », lancez une radio à partir du titre en cours : des titres proches, à la suite, sans fin. Le gros bouton d'un artiste fait de même à partir de son titre le plus populaire.
+- **Démarrage rapide.** Quand rien ne joue, le panneau propose vos titres aimés et les dernières playlists et albums lancés : une pression et la musique est là.
+- **Avancer sans souris.** La barre de progression s'atteint aux flèches ou à la croix, par pas de cinq secondes. Au clavier, X ou Espace met en pause, F aime le titre.
+
 Pas sur YouTube Music ? Le panneau pilote aussi ce qui passe par les contrôles média de Windows (Spotify, Deezer, un onglet de navigateur…) : titre, pochette, lecture/pause, précédent et suivant.
 
 ## Respect de la vie privée

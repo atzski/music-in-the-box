@@ -80,3 +80,47 @@ describe("playlists page par page", () => {
     whole.mockRestore();
   });
 });
+
+describe("démarrage rapide, paroles et déplacement", () => {
+  it("garde les derniers lancements, le plus récent d'abord, sans doublon", async () => {
+    const { pushLaunch, MAX_LAUNCHES } = await import("./musicBox");
+    const l = (id: string): import("./musicBox").Launch => ({ playlistId: id, title: id, subtitle: "", thumbnail: null });
+    let list = [l("a"), l("b"), l("c")];
+    list = pushLaunch(list, l("b"));
+    expect(list.map((x) => x.playlistId)).toEqual(["b", "a", "c"]);
+    list = pushLaunch(list, l("d"));
+    expect(list.map((x) => x.playlistId)).toEqual(["d", "b", "a"]);
+    expect(list).toHaveLength(MAX_LAUNCHES);
+  });
+
+  it("écarte un stockage abîmé au lieu de planter", async () => {
+    const { parseLaunches } = await import("./musicBox");
+    expect(parseLaunches(null)).toEqual([]);
+    expect(parseLaunches("pas du json")).toEqual([]);
+    expect(parseLaunches('{"playlistId":"x"}')).toEqual([]);
+    expect(parseLaunches('[{"playlistId":"PL1","title":"Ma liste","thumbnail":7},{"title":"sans identifiant"},null]')).toEqual([{ playlistId: "PL1", title: "Ma liste", subtitle: "", thumbnail: null }]);
+  });
+
+  it("compose la radio d'un titre", async () => {
+    const { radioOf } = await import("./musicBox");
+    expect(radioOf("abc123")).toBe("RDAMVMabc123");
+  });
+
+  it("fait avancer les paroles entre l'introduction et la fin du titre", async () => {
+    const { lyricsProgress } = await import("./musicBox");
+    expect(lyricsProgress(0, 200_000)).toBe(0);
+    expect(lyricsProgress(10_000, 200_000)).toBe(0);
+    expect(lyricsProgress(97_000, 200_000)).toBeCloseTo(0.5, 2);
+    expect(lyricsProgress(190_000, 200_000)).toBe(1);
+    // durée inconnue (diffusion en direct) : on reste en haut
+    expect(lyricsProgress(50_000, 0)).toBe(0);
+  });
+
+  it("déplace la lecture par pas de cinq secondes sans sortir du titre", async () => {
+    const { seekBy } = await import("./musicBox");
+    expect(seekBy(30_000, 1, 200_000)).toBe(35_000);
+    expect(seekBy(30_000, -2, 200_000)).toBe(20_000);
+    expect(seekBy(2_000, -1, 200_000)).toBe(0);
+    expect(seekBy(198_000, 1, 200_000)).toBe(200_000);
+  });
+});
