@@ -246,20 +246,24 @@
         }).filter(function (s) { return !/j.aime/i.test(s); }).slice(0, 25)
       };
     },
-    // recherche par catégorie (filtres de YouTube Music) : titres, artistes ou albums
+    // recherche par catégorie (filtres de YouTube Music) : titres, vidéos, artistes ou albums
     search: async function (a) {
       var q = String((a && a.query) || '').trim();
       if (!q) return [];
       var KINDS = {
         songs: ['EgWKAQIIAWoMEA4QChADEAQQCRAF', P.tracks],
+        // vidéos : ce que YouTube Music a de plus que les autres (sons de fans, extraits, remix…)
+        videos: ['EgWKAQIQAWoMEA4QChADEAQQCRAF', P.tracks],
         artists: ['EgWKAQIgAWoMEA4QChADEAQQCRAF', P.artists],
         albums: ['EgWKAQIYAWoMEA4QChADEAQQCRAF', P.albums]
       };
       var k = KINDS[a && a.kind] || KINDS.songs;
       var params = k[0], parse = k[1];
       var list = parse(await innertube('search', { query: q, params: params }));
-      // filtre refusé ou vide : résultats mélangés
-      return list.length ? list : parse(await innertube('search', { query: q }));
+      // aucun titre officiel : liste vide, iBox montre alors l'onglet Vidéos (sons de fans,
+      // extraits, remix…) ; pour les autres filtres (refusés ou vides) : résultats mélangés
+      if (list.length || a.kind === 'songs') return list;
+      return parse(await innertube('search', { query: q }));
     },
     // page d'un artiste : titres populaires
     artist: async function (a) {
