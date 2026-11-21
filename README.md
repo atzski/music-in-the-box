@@ -18,7 +18,7 @@ Windows 10 and 11 · Free and open source · A plugin for <a href="https://githu
 
 <br>
 
-<img src="docs/media/hero.webp" width="100%" alt="The Music in the Box panel opening on top of a night city in Cyberpunk 2077, then skipping to the next song: cover, title, progress bar, playback controls and volume">
+<img src="docs/media/hero.webp" width="100%" alt="The Music in the Box panel opening on top of a night city in Cyberpunk 2077, then skipping to the next song and closing again: cover, title, progress bar, playback controls, volume and the four tabs">
 
 </div>
 
@@ -34,14 +34,14 @@ Press **Alt+C** on the keyboard, or hold **View + Y** on a controller. The panel
 ## Your whole YouTube Music library
 
 <p align="center">
-  <img src="docs/media/tour.webp" width="62%" alt="Tour of the panel: the player, then the playlists, the liked songs, and a search for Daft Punk">
+  <img src="docs/media/tour.webp" width="62%" alt="Tour of the panel: the player, the playlists, what plays next, the lyrics following the song, then a search for Daft Punk down to the Discovery album">
 </p>
 
-Sign in once with your Google account and the panel gives you your library: your playlists and liked songs, what plays next, and search by song or by artist. Your liked songs show up as soon as the first page arrives, and the rest loads while you scroll.
+Sign in once with your Google account and the panel gives you your library: your playlists and liked songs, what plays next, and search by song, video, artist or album. Your liked songs show up as soon as the first page arrives, and the rest loads while you scroll.
 
 <p align="center">
   <img src="docs/media/playlists.webp" width="32%" alt="The Playlists view: liked music, a recap and mixes">
-  <img src="docs/media/liked.webp" width="32%" alt="The liked songs, with a big play button">
+  <img src="docs/media/lyrics.webp" width="32%" alt="The lyrics of the song that is playing, the current line in white">
   <img src="docs/media/search.webp" width="32%" alt="Searching for Daft Punk: songs with their artists and durations">
 </p>
 

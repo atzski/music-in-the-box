@@ -18,7 +18,7 @@ Windows 10 et 11 · Gratuit et open source · Un plugin pour <a href="https://gi
 
 <br>
 
-<img src="docs/media/hero.webp" width="100%" alt="Le panneau Music in the Box qui s'ouvre par-dessus une ville de nuit dans Cyberpunk 2077, puis passe au titre suivant : pochette, titre, barre de progression, commandes de lecture et volume">
+<img src="docs/media/hero.webp" width="100%" alt="Le panneau Music in the Box qui s'ouvre par-dessus une ville de nuit dans Cyberpunk 2077, passe au titre suivant puis se referme : pochette, titre, barre de progression, commandes de lecture, volume et les quatre onglets">
 
 </div>
 
@@ -34,14 +34,14 @@ Windows 10 et 11 · Gratuit et open source · Un plugin pour <a href="https://gi
 ## Toute votre bibliothèque YouTube Music
 
 <p align="center">
-  <img src="docs/media/tour.webp" width="62%" alt="Visite du panneau : le lecteur, puis les playlists, les titres aimés et une recherche de Daft Punk">
+  <img src="docs/media/tour.webp" width="62%" alt="Visite du panneau : le lecteur, les playlists, la file « À suivre », les paroles qui suivent la chanson, puis une recherche de Daft Punk jusqu'à l'album Discovery">
 </p>
 
-Connectez votre compte Google une fois, et le panneau vous donne votre bibliothèque : playlists et titres aimés, la file « À suivre », et la recherche par titre ou par artiste. Vos titres aimés s'affichent dès la première page, la suite arrive pendant que vous parcourez.
+Connectez votre compte Google une fois, et le panneau vous donne votre bibliothèque : playlists et titres aimés, la file « À suivre », et la recherche par titre, vidéo, artiste ou album. Vos titres aimés s'affichent dès la première page, la suite arrive pendant que vous parcourez.
 
 <p align="center">
   <img src="docs/media/playlists.webp" width="32%" alt="La vue Playlists : titres aimés, récap et mix">
-  <img src="docs/media/liked.webp" width="32%" alt="Les titres aimés, avec un grand bouton lecture">
+  <img src="docs/media/lyrics.webp" width="32%" alt="Les paroles de la chanson en cours, la ligne chantée en blanc">
   <img src="docs/media/search.webp" width="32%" alt="Recherche de Daft Punk : titres, artistes et durées">
 </p>
 
