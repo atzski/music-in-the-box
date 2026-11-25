@@ -269,30 +269,52 @@ var ytmParse = (function () {
   function queue(json) {
     var out = [], seen = {};
     var panel = find(json, 'playlistPanelRenderer');
-    var items = ((panel && panel.contents) || []).map(function (c) {
-      if (c.playlistPanelVideoRenderer) return c.playlistPanelVideoRenderer;
-      var w = c.playlistPanelVideoWrapperRenderer;
-      return w && w.primaryRenderer && w.primaryRenderer.playlistPanelVideoRenderer;
-    });
-    items.forEach(function (r) {
+    ((panel && panel.contents) || []).map(panelVideo).forEach(function (r) {
       if (!r || !r.videoId || seen[r.videoId]) return;
       seen[r.videoId] = 1;
-      var by = (r.shortBylineText && r.shortBylineText.runs) || (r.longBylineText && r.longBylineText.runs) || [];
-      var w = r.navigationEndpoint && r.navigationEndpoint.watchEndpoint;
-      // artistes liés : la première partie de la ligne longue (avant « • vues »)
-      var long = (r.longBylineText && r.longBylineText.runs) || [], head = [];
-      for (var k = 0; k < long.length && !/^s*•s*$/.test(long[k].text); k++) head.push(long[k]);
-      out.push({
-        videoId: r.videoId,
-        title: text(r.title),
-        artist: by.map(function (x) { return x.text; }).join('').split(SEP)[0] || '',
-        artists: artistRefs(head),
-        duration: text(r.lengthText) || null,
-        thumbnail: thumb(r.thumbnail),
-        selected: !!r.selected,
-        playlistId: (w && w.playlistId) || null,
-        index: w && typeof w.index === 'number' ? w.index : null
-      });
+      out.push(queueItem(r));
+    });
+    return out;
+  }
+
+  // titre d'une file : le rendu principal (audio) quand il existe en deux versions
+  function panelVideo(c) {
+    if (!c) return null;
+    if (c.playlistPanelVideoRenderer) return c.playlistPanelVideoRenderer;
+    var w = c.playlistPanelVideoWrapperRenderer;
+    return (w && w.primaryRenderer && w.primaryRenderer.playlistPanelVideoRenderer) || null;
+  }
+
+  function queueItem(r) {
+    var by = (r.shortBylineText && r.shortBylineText.runs) || (r.longBylineText && r.longBylineText.runs) || [];
+    var w = r.navigationEndpoint && r.navigationEndpoint.watchEndpoint;
+    // artistes liés : la première partie de la ligne longue (avant « • vues »)
+    var long = (r.longBylineText && r.longBylineText.runs) || [], head = [];
+    for (var k = 0; k < long.length && !/^s*•s*$/.test(long[k].text); k++) head.push(long[k]);
+    return {
+      videoId: r.videoId,
+      title: text(r.title),
+      artist: by.map(function (x) { return x.text; }).join('').split(SEP)[0] || '',
+      artists: artistRefs(head),
+      duration: text(r.lengthText) || null,
+      thumbnail: thumb(r.thumbnail),
+      selected: !!r.selected,
+      playlistId: (w && w.playlistId) || null,
+      index: w && typeof w.index === 'number' ? w.index : null
+    };
+  }
+
+  // File du lecteur de la page (titres ajoutés compris) : chaque titre garde sa place
+  // (`queueIndex`), un même titre peut y figurer deux fois ; `current` : la place du titre en cours.
+  function queueItems(items, current) {
+    var out = [];
+    (items || []).forEach(function (c, i) {
+      var r = panelVideo(c);
+      if (!r || !r.videoId) return;
+      var q = queueItem(r);
+      q.selected = i === current;
+      q.queueIndex = i;
+      out.push(q);
     });
     return out;
   }
@@ -355,5 +377,5 @@ var ytmParse = (function () {
     return { lines: lines, times: times, source: (typeof source === 'string' && source.trim()) || null };
   }
 
-  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue, queueInfo: queueInfo, lyricsId: lyricsId, lyrics: lyrics, timedLyrics: timedLyrics };
+  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue, queueItems: queueItems, panelVideo: panelVideo, queueInfo: queueInfo, lyricsId: lyricsId, lyrics: lyrics, timedLyrics: timedLyrics };
 })();

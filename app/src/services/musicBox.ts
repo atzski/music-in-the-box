@@ -132,6 +132,11 @@ export interface QueueItem {
   selected: boolean;
   playlistId: string | null;
   index: number | null;
+  /**
+   * Place dans la file du lecteur (pont 13 et plus) : la file lue dans la page, titres ajoutés
+   * compris. Absente : file du serveur, le titre se relance par `playItem`.
+   */
+  queueIndex?: number | null;
 }
 
 /** Paroles d'un titre : une ligne vide sépare deux couplets. */
@@ -472,6 +477,13 @@ export const music = {
   /** Une page de playlist (pont 1.0.1 et plus) : `next` à repasser pour la suivante. */
   playlistPage: (id: string, next?: PageToken | null) => ytm<{ tracks: Track[]; next: PageToken | null }>("playlistPage", next ? { next } : { id }),
   queue: () => ytm<QueueItem[]>("queue"),
+  /**
+   * Ajoute un titre à la fin de la file (`next` : juste après celui en cours). File vide : le
+   * titre est lancé. Pont 13 et plus ; un pont plus ancien rejette « commande-inconnue ».
+   */
+  enqueue: (videoId: string, next = false) => ytm<boolean>("enqueue", { videoId, next }),
+  /** Passe à un titre de la file du lecteur sans la refaire (pont 13 et plus). */
+  queuePlay: (q: { queueIndex: number; videoId: string }) => ytm<boolean>("queuePlay", { index: q.queueIndex, videoId: q.videoId }),
   /** Paroles d'un titre (pont 1.0.3 et plus) : null quand YouTube Music n'en a pas. */
   lyrics: (videoId: string) => ytm<Lyrics | null>("lyrics", { videoId }),
   /** Lance un titre, une playlist, ou une playlist à partir d'un titre. */

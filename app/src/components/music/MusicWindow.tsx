@@ -169,6 +169,7 @@ export function MusicWindow() {
   /** Suite automatique ; `autoplayOld` : le plugin installé ne la connaît pas (réglage caché). */
   const [autoplay, setAutoplay] = useState(readAutoplay);
   const [autoplayOld, setAutoplayOld] = useState(false);
+  const [queueOld, setQueueOld] = useState(false);
   const [screen, setScreen] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [miniH, setMiniH] = useState(520);
   const [moving, setMoving] = useState<{ left: number; top: number } | null>(null);
@@ -478,6 +479,19 @@ export function MusicWindow() {
       setError("Lecture impossible.");
     }
   }, []);
+  // titre de la file du lecteur : on y saute, la file (et ce qu'on y a ajouté) reste
+  const playInQueue = useCallback(async (q: { queueIndex: number; videoId: string }) => {
+    sound.play("select");
+    setError(null);
+    try {
+      await music.queuePlay(q);
+      setDir(-1);
+      setView("mini");
+      window.setTimeout(() => void music.state().then(setState).catch(() => undefined), 1200);
+    } catch {
+      setError("Lecture impossible.");
+    }
+  }, []);
 
   const openList = useCallback((list: Playlist) => {
     setDir(1);
@@ -667,6 +681,22 @@ export function MusicWindow() {
   );
   // artistes du titre en cours : ceux que la file donne pour lui (YouTube Music seulement)
   const nowArtists = useMemo(() => (youtube && n ? queue.find((q) => q.videoId === n.id)?.artists : undefined), [queue, youtube, n?.id]);
+  // ajout à la file : la file affichée est relue aussitôt après ; un pont trop ancien ne sait pas
+  // le faire (les boutons disparaissent et le panneau dit quoi mettre à jour)
+  const enqueue = useCallback(async (videoId: string) => {
+    setError(null);
+    try {
+      await music.enqueue(videoId);
+      window.setTimeout(() => void music.queue().then(setQueue).catch(() => undefined), 700);
+      return true;
+    } catch (e) {
+      if (e === "commande-inconnue") {
+        setQueueOld(true);
+        setError("Mettez à jour le plugin Music in the Box (Paramètres › Plugins) pour ajouter des titres à la file.");
+      } else setError("Ajout à la file impossible.");
+      return false;
+    }
+  }, []);
 
   // clé et sens du contenu (pour des fondus orientés)
   const contentKey = view === "mini" ? (compact ? "compact" : "mini") : view === "search" && album ? `album-${album.id}` : view === "search" && artist ? `artist-${artist.id}` : view === "lists" && detail ? `list-${detail.list.id}` : view;
@@ -674,6 +704,7 @@ export function MusicWindow() {
   return (
     <ArtistOpen.Provider value={state?.youtube ? showArtist : null}>
     <NowArtists.Provider value={nowArtists}>
+    <QueueAdd.Provider value={state?.youtube && !queueOld ? enqueue : null}>
     <div
       data-nav-root
       data-nav-main
@@ -745,7 +776,7 @@ export function MusicWindow() {
                               autoplay={autoplayOld ? null : autoplay}
                               onAutoplay={changeAutoplay}
                               onFade={changeFade}
-                              onPlay={(q) => void play({ videoId: q.videoId, playlistId: q.playlistId ?? undefined, index: q.index ?? undefined })}
+                              onPlay={(q) => void (q.queueIndex != null ? playInQueue({ queueIndex: q.queueIndex, videoId: q.videoId }) : play({ videoId: q.videoId, playlistId: q.playlistId ?? undefined, index: q.index ?? undefined }))}
                               onRadio={youtube && n ? () => void play({ videoId: n.id, playlistId: radioOf(n.id) }) : undefined}
                             />
                           ) : view === "lyrics" ? (
@@ -818,6 +849,7 @@ export function MusicWindow() {
       </AnimatePresence>
       <PadKeyboard />
     </div>
+    </QueueAdd.Provider>
     </NowArtists.Provider>
     </ArtistOpen.Provider>
   );
@@ -1761,6 +1793,57 @@ function Row({ title, artist, artists, duration, thumbnail, index, current, play
   );
 }
 
+// ——— Ajout à la file ———
+
+/** Ajoute un titre à la file d'attente (null : pas de YouTube Music, ou pont trop ancien). */
+const QueueAdd = createContext<((videoId: string) => Promise<boolean>) | null>(null);
+
+type RowProps = Parameters<typeof Row>[0];
+
+/** Ligne d'un titre, avec son bouton « Ajouter à la file d'attente » quand c'est possible. */
+function TrackRow({ videoId, ...row }: RowProps & { videoId: string }) {
+  const add = useContext(QueueAdd);
+  if (!add) return <Row {...row} />;
+  return (
+    <div className="flex items-center gap-1">
+      <Row {...row} />
+      <AddToQueue videoId={videoId} title={row.title} add={add} />
+    </div>
+  );
+}
+
+function AddToQueue({ videoId, title, add }: { videoId: string; title: string; add: (videoId: string) => Promise<boolean> }) {
+  const [done, setDone] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const label = done ? `« ${title} » ajouté à la file d’attente` : `Ajouter « ${title} » à la file d’attente`;
+  return (
+    <motion.button
+      type="button"
+      data-focusable
+      aria-label={label}
+      title={done ? "Ajouté à la file d’attente" : "Ajouter à la file d’attente"}
+      whileTap={{ scale: 0.88 }}
+      onClick={() => {
+        sound.play("select");
+        void add(videoId).then((ok) => {
+          if (!ok) return;
+          setDone(true);
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setDone(false), 1800);
+        });
+      }}
+      className={`ibox-focusable grid size-9 flex-none place-items-center rounded-full transition-colors [--ring-radius:999px] ${done ? "bg-[color-mix(in_srgb,var(--accent)_30%,transparent)] text-[var(--accent)]" : "text-white/40 hover:bg-white/10 hover:text-white"}`}
+    >
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.span key={done ? "ok" : "add"} initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={reduced() ? { duration: 0 } : TWEEN.fast} className="grid place-items-center">
+          <Icon name={done ? "check" : "plus"} size="1.1rem" />
+        </motion.span>
+      </AnimatePresence>
+    </motion.button>
+  );
+}
+
 // ——— Noms d'artistes ———
 
 /** Ouvre la fiche d'un artiste (null : pas de YouTube Music, les noms restent du texte). */
@@ -1893,7 +1976,7 @@ function PlaylistDetail({ detail, current, onPlay }: { detail: { list: Playlist;
             <p className="py-6 text-center text-[0.9rem] font-bold text-white/55">Aucun titre à afficher.</p>
           ) : (
             tracks.map((t, i) => (
-              <Row key={t.videoId} index={i} title={t.title} artist={t.artist} artists={t.artists} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => onPlay({ videoId: t.videoId, playlistId: list.playlistId, index: i }, launchOf(list))} />
+              <TrackRow key={t.videoId} videoId={t.videoId} index={i} title={t.title} artist={t.artist} artists={t.artists} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => onPlay({ videoId: t.videoId, playlistId: list.playlistId, index: i }, launchOf(list))} />
             ))
           )}
         </div>
@@ -1947,7 +2030,7 @@ function ArtistDetail({ artist, current, onPlay, onRadio, onCard }: { artist: Ar
             <>
               <ShelfTitle title="Titres" count={songs && songs.length > ARTIST_TOP ? songs.length : undefined} />
               {shown.map((t, i) => (
-                <Row key={t.videoId} index={i} title={t.title} artist={t.album ?? t.artist} duration={t.duration} thumbnail={t.thumbnail} current={playing(t.videoId)} playing={!!current?.playing} onClick={() => onPlay(t, list, list ? i : undefined)} />
+                <TrackRow key={t.videoId} videoId={t.videoId} index={i} title={t.title} artist={t.album ?? t.artist} duration={t.duration} thumbnail={t.thumbnail} current={playing(t.videoId)} playing={!!current?.playing} onClick={() => onPlay(t, list, list ? i : undefined)} />
               ))}
               {songs && songs.length > ARTIST_TOP && (
                 <motion.button
@@ -2069,7 +2152,7 @@ function AlbumDetail({ album, current, onPlay }: { album: { preview: Album; page
           ) : tracks.length === 0 ? (
             <p className="py-6 text-center text-[0.9rem] font-bold text-white/55">Aucun titre à afficher.</p>
           ) : (
-            tracks.map((t, i) => <Row key={t.videoId} index={i} title={t.title} artist={t.artist} artists={t.artists} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => playAt(i)} />)
+            tracks.map((t, i) => <TrackRow key={t.videoId} videoId={t.videoId} index={i} title={t.title} artist={t.artist} artists={t.artists} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => playAt(i)} />)
           )}
         </div>
       </Scroll>
@@ -2242,7 +2325,8 @@ function QueueList({ items, current, fade, fadeOld, crossNote, autoplay, onAutop
             // la suite automatique commence ici : une ligne la sépare de la file
             const autoStart = q.auto && (i === 0 || !items[i - 1].auto);
             return (
-              <div key={q.videoId}>
+              // un même titre peut figurer deux fois dans la file du lecteur
+              <div key={q.queueIndex != null ? `${q.queueIndex}-${q.videoId}` : q.videoId}>
                 {autoStart && (
                   <div className="mt-3 mb-1 flex items-center gap-2 px-2 text-[0.75rem] font-extrabold tracking-wide text-white/45 uppercase">
                     <AutoplayGlyph size={14} />
@@ -2591,8 +2675,9 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, 
             <motion.div key={search.kind} initial={{ opacity: 0, x: search.kind === "songs" ? -16 : 16 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.2, ease: EASE }} className="mt-1 flex flex-col gap-0.5">
               {search.kind === "songs" || search.kind === "videos"
                 ? (search[search.kind] ?? []).map((t, i) => (
-                    <Row
+                    <TrackRow
                       key={t.videoId}
+                      videoId={t.videoId}
                       index={i}
                       title={t.title}
                       artist={t.artist}

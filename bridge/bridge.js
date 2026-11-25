@@ -7,7 +7,7 @@
 
   var P = ytmParse;
   var results = {};
-  var VERSION = 12;
+  var VERSION = 13;
   /** Pages lues au plus pour une playlist (environ 100 titres par page). */
   var MAX_PAGES = 10;
 
@@ -992,10 +992,41 @@
     });
     return auto.loading;
   }
+  // ——— File du lecteur ———
+  // La vraie file de YouTube Music, celle que « suivant » parcourt, lue dans l'état de la page.
+  // Un titre ajouté à la file n'existe que là : la réponse `next` du serveur ne le connaît pas.
+  function clientQueue() {
+    var el = document.querySelector('ytmusic-player-queue'), q = el && el.queue;
+    if (!q || !q.getItems || !q.getCurrentItemIndex) return null;
+    try {
+      var items = q.getItems() || [];
+      return { svc: q, items: items, index: q.getCurrentItemIndex() };
+    } catch (e) { return null; }
+  }
+  // des titres attendent après celui en cours (ajoutés par l'utilisateur, ou la suite de la liste)
+  function clientAhead() {
+    var c = clientQueue();
+    return !!(c && c.index >= 0 && c.index < c.items.length - 1);
+  }
+  // Ajout à la file, comme le menu « Ajouter à la file d'attente » / « Lire ensuite » de YouTube
+  // Music : son propre gestionnaire (celui des entrées de menu) lit le titre et l'insère. File
+  // vide : il lance le titre.
+  function queueAdd(videoId, next) {
+    var h = document.createElement('ytmusic-menu-service-item-renderer');
+    if (!h || typeof h.handleCommand !== 'function') throw new Error('file-indisponible');
+    return Promise.resolve(h.handleCommand({
+      queueAddEndpoint: {
+        queueTarget: { videoId: videoId, onEmptyQueue: { watchEndpoint: { videoId: videoId } } },
+        queueInsertPosition: next ? 'INSERT_AFTER_CURRENT_VIDEO' : 'INSERT_AT_END'
+      }
+    }));
+  }
+
   // passe au titre suivant : la suite automatique quand la file est finie, sinon « suivant »
   function advance(p) {
     var d = p.getVideoData ? p.getVideoData() : {}, a = auto.list;
-    if (a && a.id === d.video_id && !a.used && autoWanted()) {
+    // un titre ajouté à la file passe avant la suite automatique
+    if (a && a.id === d.video_id && !a.used && autoWanted() && !clientAhead()) {
       a.used = true;
       var first = a.items[0], w = { videoId: first.videoId, playlistId: a.playlistId };
       if (a.params) w.params = a.params;
@@ -1020,7 +1051,7 @@
       if (st !== 0) { auto.ended = null; return; }
       if (!auto.ended || auto.ended.id !== id) { auto.ended = { id: id, at: Date.now() }; return; }
       // un court instant d'abord : si YouTube Music enchaîne de lui-même, le titre aura déjà changé
-      if (Date.now() - auto.ended.at > 900 && auto.list && auto.list.id === id && !auto.list.used) {
+      if (Date.now() - auto.ended.at > 900 && auto.list && auto.list.id === id && !auto.list.used && !clientAhead()) {
         auto.ended = null;
         advance(p);
       }
@@ -1282,14 +1313,33 @@
     },
     // file d'attente du titre en cours (titres suivants de la playlist ou de la radio)
     // la suite automatique y figure, marquée `auto`, quand la file s'arrête après ce titre
+    // La file du lecteur quand la page en a une (titres ajoutés compris, chacun avec sa place
+    // `queueIndex`), sinon celle du serveur.
     queue: async function () {
       var p = needPlayer(), d = p.getVideoData ? p.getVideoData() : {};
       if (!d.video_id) return [];
       var info = await autoLoad(p, d.video_id);
-      var items = info.items.slice();
-      var a = auto.list && auto.list.id === d.video_id && autoWanted() ? auto.list : null;
-      if (a) a.items.forEach(function (q) { items.push(Object.assign({}, q, { auto: true, selected: false })); });
+      var c = clientQueue();
+      var items = c && c.items.length && c.index >= 0 ? P.queueItems(c.items, c.index) : info.items.slice();
+      var a = auto.list && auto.list.id === d.video_id && autoWanted() && !clientAhead() ? auto.list : null;
+      if (a) a.items.forEach(function (q) { items.push(Object.assign({}, q, { auto: true, selected: false, queueIndex: null })); });
       return items;
+    },
+    // {videoId, next} : ajoute un titre à la fin de la file, ou juste après le titre en cours
+    enqueue: async function (a) {
+      var id = String((a && a.videoId) || '');
+      if (!/^[\w-]{6,}$/.test(id)) throw new Error('titre-inconnu');
+      await queueAdd(id, !!(a && a.next));
+      return true;
+    },
+    // {index, videoId} : passe à ce titre de la file sans la refaire (les titres ajoutés restent)
+    queuePlay: function (a) {
+      var c = clientQueue(), i = Number(a && a.index), id = String((a && a.videoId) || '');
+      var item = c && c.items[i], r = item && P.panelVideo(item);
+      // la file a changé entre-temps : le titre est lancé seul
+      if (!r || r.videoId !== id) return COMMANDS.playItem({ videoId: id });
+      fadeThen(function () { c.svc.selectQueueItem(item); });
+      return true;
     },
     // suite automatique : {on} ; rend l'état retenu
     autoplay: function (a) {

@@ -1,7 +1,7 @@
 {
   "name": "music-in-the-box",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.10",
   "type": "module",
   "description": "Plugin iBox : YouTube Music ou votre lecteur, par-dessus vos parties.",
   "scripts": {
