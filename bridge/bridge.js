@@ -7,7 +7,7 @@
 
   var P = ytmParse;
   var results = {};
-  var VERSION = 10;
+  var VERSION = 12;
   /** Pages lues au plus pour une playlist (environ 100 titres par page). */
   var MAX_PAGES = 10;
 
@@ -331,10 +331,75 @@
     } catch (e) { r.gain.gain.value = value; }
   }
   // retard du chemin Web Audio sur celui de la balise : l'écho se cale d'autant en avance
+  // Retard d'un contexte Web Audio entre la balise et le haut-parleur (traitement + sortie). Mesuré
+  // le 26/11/2026 sur le vrai lecteur : 10 ms + 56 ms. Le lecteur principal, joué en direct, ne
+  // l'a pas : à la prise de parole, il se taisait avant que l'écho ne s'entende, d'où une
+  // micro-coupure au début de chaque fondu (et l'écho se calait 50 ms trop tard).
+  function ctxDelay(c) {
+    if (!c) return 0;
+    var d = (Number(c.baseLatency) || 0) + (Number(c.outputLatency) || 0);
+    return Math.max(0, Math.min(0.25, d));
+  }
+  // avance de l'écho sur le lecteur principal, pour que les deux s'entendent au même instant
   function echoLead() {
-    var r = echo.route, c = r && r.ctx;
-    var lat = c ? (Number(c.baseLatency) || 0) : 0;
-    return Math.max(0, Math.min(0.06, lat));
+    var e = ctxDelay(echo.route && echo.route.ctx);
+    return mainRouted() ? Math.max(-0.1, Math.min(0.2, e - ctxDelay(mainRoute.ctx))) : e;
+  }
+  // Le lecteur principal passe lui aussi par Web Audio pendant les fondus enchaînés : même retard
+  // que l'écho, et un gain pour le passage de l'un à l'autre (une courbe de 60 ms au lieu d'une
+  // coupure). Son gain vaut 1 en dehors du passage ; il est rétabli à chaque arrêt, quoi qu'il arrive.
+  var mainRoute = null;
+  function mainRouted() {
+    var r = mainRoute, v = document.querySelector('video');
+    return !!(r && r.el && r.el === v && r.ctx.state === 'running');
+  }
+  function mainRouteTry() {
+    var v = document.querySelector('video');
+    if (!v) return false;
+    try {
+      if (!mainRoute) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return false;
+        var ctx = new AC({ latencyHint: 'interactive' }), gain = ctx.createGain();
+        gain.gain.value = 1;
+        gain.connect(ctx.destination);
+        mainRoute = { ctx: ctx, gain: gain, el: null };
+      }
+      if (mainRoute.ctx.state !== 'running') { mainRoute.ctx.resume(); return false; }
+      if (mainRoute.el !== v) { mainRoute.ctx.createMediaElementSource(v).connect(mainRoute.gain); mainRoute.el = v; }
+      return true;
+    } catch (e) { return false; }
+  }
+  // gain du principal : `ramp` secondes de courbe droite (0 : net), après `delay` secondes
+  function mainGainTo(value, ramp, delay) {
+    var r = mainRoute;
+    if (!r) return;
+    try {
+      var t0 = r.ctx.currentTime, g = r.gain.gain, at = t0 + (delay || 0);
+      g.cancelScheduledValues(t0);
+      g.setValueAtTime(g.value, t0);
+      if (ramp > 0) g.linearRampToValueAtTime(value, at + ramp);
+      else g.setValueAtTime(value, at);
+    } catch (e) { r.gain.gain.value = value; }
+  }
+  function mainGainRestore() {
+    if (mainRoute && Math.abs(mainRoute.gain.gain.value - 1) > 0.001) mainGainTo(1, 0);
+  }
+  // l'écho monte en `ramp` secondes jusqu'au gain `g` (même calcul que echoSet)
+  function echoRampTo(g, ramp) {
+    var v = echoVideo(), p = player(), r = echo.route;
+    echo.gain = g;
+    if (!v || !r) return;
+    var user = fade.user != null ? fade.user : p && p.getVolume ? p.getVolume() : 0;
+    var vol = Math.max(0, Math.min(1, echo.norm * user / 100 * g));
+    if (v.muted) v.muted = false;
+    if (v.volume < 0.999) v.volume = 1;
+    try {
+      var t0 = r.ctx.currentTime, gp = r.gain.gain;
+      gp.cancelScheduledValues(t0);
+      gp.setValueAtTime(gp.value, t0);
+      gp.linearRampToValueAtTime(vol, t0 + ramp);
+    } catch (e) { r.gain.gain.value = vol; }
   }
   function echoArm() {
     var d = echoDoc();
@@ -358,6 +423,7 @@
     var p = echoPlayer(), v = echoVideo();
     echo.speaking = false; echo.gain = 0; echo.job = null;
     echoGain(0, true);
+    mainGainRestore();
     // branchée, la balise n'est jamais coupée par le pont : le gain fait le silence (couper la
     // balise d'un autre que son lecteur fait réagir YouTube)
     if (v) { if (!echoRouted()) v.muted = true; try { v.playbackRate = 1; } catch (e) { /* balise partie */ } }
@@ -402,7 +468,9 @@
     var ep = echoPlayer();
     if (!ep) return;
     var j = echo.job, es = ep.getPlayerState();
-    var allowed = j && (j.phase === 'load' || j.phase === 'sync' || (echo.speaking && (j.phase === 'cross' || j.phase === 'abort')));
+    var allowed = j && (j.phase === 'load' || j.phase === 'sync' || (echo.speaking && (j.phase === 'swap' || j.phase === 'cross' || j.phase === 'abort')));
+    // hors du passage (et du retour programmé juste après), le principal n'est jamais laissé baissé
+    if (!(j && (j.phase === 'swap' || (j.phase === 'cross' && Date.now() - j.hand < 500)))) mainGainRestore();
     if (allowed || (es !== 1 && es !== 3)) return;
     echoGain(0, true);
     var v = echoVideo();
@@ -412,6 +480,12 @@
   function crossAbort() {
     var j = echo.job;
     if (!j) return;
+    if (j.phase === 'swap') {
+      // passage interrompu : le principal reprend aussitôt, l'écho se tait
+      mainGainTo(1, 0.03);
+      echoStop(false);
+      return;
+    }
     if (j.phase === 'cross') {
       j.phase = 'abort'; j.abortAt = Date.now(); j.abortG = echo.speaking ? echo.gain : 0; j.abortFrom = fade.g;
       fade.since = Date.now();
@@ -483,6 +557,7 @@
       }
       echo.routeSince = 0;
       echoGain(0, true);
+      mainRouteTry();
       ep.loadVideoById({ videoId: id, startSeconds: pos / 1000 + 1 });
       echo.job = { id: id, phase: 'load', at: now, D: D, started: 0, locked: 0, sought: 0, lead: 0.05, act: repeatMode() === 'one' ? 'again' : 'next' };
       fade.fast = true;
@@ -554,18 +629,33 @@
       // il reste moins que la durée réglée (titre court, déplacement près de la fin, réglage long) :
       // le fondu est raccourci dès maintenant, et les deux courbes arrivent ensemble au bout
       j.D = Math.min(j.D, Math.max(500, left - lat));
-      // début du fondu : l'écho prend la parole au même instant du même titre, puis le lecteur
-      // de la page passe au suivant
+      // début du fondu : l'écho prend la parole au même instant du même titre. Passage en 60 ms :
+      // l'écho monte pendant que le principal descend (même son, calé) ; sans principal branché,
+      // le principal attend que l'écho s'entende pour se taire. Puis il passe au suivant.
       j.g0 = Math.max(0.05, fade.g);
-      fadeVolume(p, 0);
-      fade.g = 0;
       echo.speaking = true;
       ev.playbackRate = 1;
-      echoSet(j.g0);
-      j.phase = 'cross'; j.hand = now; j.since = fade.since;
+      var swap = 0.06;
+      echoRampTo(j.g0, swap);
+      if (mainRouted()) { mainGainTo(0, swap); j.swapWait = swap * 1000 + 30; }
+      else j.swapWait = swap * 1000 + ctxDelay(echo.route && echo.route.ctx) * 1000;
+      j.phase = 'swap'; j.swapAt = now; j.since = fade.since;
+      return j.g0;
+    }
+
+    // fin du passage : le principal, déjà silencieux, se baisse et passe au titre suivant
+    if (j.phase === 'swap') {
+      if (es !== 1 || id !== j.id) { mainGainTo(1, 0.03); echoStop(false); return null; }
+      if (now - j.swapAt < j.swapWait) return j.g0;
+      fadeVolume(p, 0);
+      fade.g = 0;
+      // le gain revient un peu plus tard : le son déjà en route à plein volume ne doit pas passer
+      mainGainTo(1, 0, 0.15);
+      j.phase = 'cross'; j.hand = now;
       j.from = id; j.handPos = ep.getCurrentTime(); j.end = ep.getDuration() || dur / 1000;
       j.inSeen = 0; j.inPos = 0;
       if (j.act === 'again') p.seekTo(0, true); else j.nav = advance(p) === 'auto';
+      resumeGuard = { until: now + 20000, n: 0, pausedAt: 0 };
       return 0;
     }
 
@@ -921,7 +1011,7 @@
     try {
       var p = player();
       // note en continu le dernier instant où la musique s'entendait (voir heardState)
-      if (p && p.getPlayerState) heardState(p);
+      if (p && p.getPlayerState) { heardState(p); resumeWatch(p); }
       echoWatch();
       if (!p || !p.getPlayerState || !auto.on || adPlaying(p)) return;
       var st = p.getPlayerState(), d = p.getVideoData ? p.getVideoData() : {}, id = d && d.video_id;
@@ -998,14 +1088,37 @@
     }, 2500);
   }
 
-  // « Vidéo mise en pause. Continuer ? » : apparaît après une longue écoute sans interaction.
+  // « Vidéo mise en pause. Continuer ? » : apparaît après une longue écoute sans interaction (dans
+  // iBox, personne ne touche jamais cette page), souvent au démarrage d'un titre. Le bouton est
+  // cliqué, et la lecture relancée si le clic n'a pas suffi (sauf pause demandée par l'utilisateur).
   setInterval(function () {
     var d = document.querySelector('ytmusic-you-there-renderer');
     if (d && d.offsetParent !== null) {
       var b = d.querySelector('button, tp-yt-paper-button, yt-button-renderer');
       if (b) b.click();
+      setTimeout(function () {
+        var p = player();
+        if (p && p.getPlayerState && p.getPlayerState() === 2 && Date.now() - echo.userPause > 3000) p.playVideo();
+      }, 400);
     }
-  }, 4000);
+  }, 1000);
+
+  // Après chaque passage au titre suivant (fondu enchaîné), 20 s de garde : si le nouveau titre se
+  // met en pause sans que l'utilisateur l'ait demandé (lectures simultanées refusées par le compte,
+  // ordre « pause » venu du système, question de YouTube), il repart. Deux fois au plus.
+  var resumeGuard = null;
+  function resumeWatch(p) {
+    var g = resumeGuard, now = Date.now();
+    if (!g) return;
+    if (now > g.until) { resumeGuard = null; return; }
+    if (p.getPlayerState() !== 2) { g.pausedAt = 0; g.user = false; return; }
+    // une pause demandée par l'utilisateur (dans les 3 s qui la précèdent) n'est jamais relancée
+    if (!g.pausedAt) { g.pausedAt = now; g.user = now - echo.userPause < 3000; return; }
+    if (g.user || now - g.pausedAt < 600 || g.n >= 2) return;
+    g.n++;
+    g.pausedAt = 0;
+    p.playVideo();
+  }
 
   async function playlistTracks(id) {
     if (!/^VL/.test(id)) id = 'VL' + id;
