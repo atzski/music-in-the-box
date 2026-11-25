@@ -7,7 +7,7 @@
 
   var P = ytmParse;
   var results = {};
-  var VERSION = 8;
+  var VERSION = 10;
   /** Pages lues au plus pour une playlist (environ 100 titres par page). */
   var MAX_PAGES = 10;
 
@@ -395,6 +395,20 @@
   // un geste de l'utilisateur (suivant, autre titre, déplacement) interrompt le fondu enchaîné :
   // l'écho s'éteint en un fondu court, le lecteur reprend la main
   // l'écho s'éteint en courbe pendant que le lecteur remonte, en ``CROSS_ABORT`` ms
+  // Garde de l'écho, toutes les 500 ms, fondu ou pas : en dehors de la préparation et de sa prise
+  // de parole, il ne doit rien jouer. S'il joue quand même (YouTube qui enchaîne, reprise venue
+  // d'ailleurs), il est remis à zéro et arrêté.
+  function echoWatch() {
+    var ep = echoPlayer();
+    if (!ep) return;
+    var j = echo.job, es = ep.getPlayerState();
+    var allowed = j && (j.phase === 'load' || j.phase === 'sync' || (echo.speaking && (j.phase === 'cross' || j.phase === 'abort')));
+    if (allowed || (es !== 1 && es !== 3)) return;
+    echoGain(0, true);
+    var v = echoVideo();
+    if (v && !echoRouted()) v.muted = true;
+    try { ep.pauseVideo(); if (ep.stopVideo) ep.stopVideo(); } catch (e) { /* cadre parti */ }
+  }
   function crossAbort() {
     var j = echo.job;
     if (!j) return;
@@ -527,7 +541,8 @@
         echoStop(false);
         return null;
       }
-      var left = dur - pos, lat = echo.lat * 1000;
+      // départ avancé du temps que met le suivant à se faire entendre et de la marge de fin de l'écho
+      var left = dur - pos, lat = echo.lat * 1000 + 350;
       if (left > j.D + lat) return null;
       if (!(j.locked && now - j.locked >= 250 && st === 1)) {
         // pas encore calé : le lecteur garde son plein volume tant qu'il reste de quoi faire un fondu
@@ -578,7 +593,8 @@
     // Jusque-là l'écho garde son volume ; ensuite les deux courbes avancent ensemble, et la
     // somme des puissances reste constante.
     if (!j.S && (ad || (j.low && st === 1))) {
-      var tail = echo.speaking ? Math.max(0.3, j.end - et) : j.D / 1000;
+      // ce qui reste de l'ancien titre, moins la marge où l'écho est arrêté avant la fin du fichier
+      var tail = echo.speaking ? Math.max(0.3, j.end - et - 0.35) : j.D / 1000;
       j.et0 = et;
       // durée du fondu : jamais plus que la durée réglée, ni que ce qui reste de l'ancien titre,
       // ni qu'un tiers du nouveau
@@ -587,15 +603,24 @@
       if (!ad) echo.lat = Math.max(0.1, Math.min(2.5, echo.lat / 2 + ((now - j.hand) / 1000 - pos / 1000) / 2));
     }
     if (echo.speaking && echo.route && !echoRouted() && !echoRoute()) crossRecover(j, now);
+    // l'écho ne parle que pour l'ancien titre, à une position qui ne recule pas. S'il passe à un
+    // autre titre (enchaînement de YouTube, touche multimédia) ou repart en arrière, sa position
+    // recommence à zéro : la courbe lui rendait tout son volume, et un autre titre jouait par-dessus
+    // celui prévu (« deux musiques distinctes en même temps »). Il se tait aussitôt.
     if (echo.speaking) {
-      var x = j.S ? (et - j.et0) / j.S : 0;
+      var ed = ep.getVideoData ? ep.getVideoData() : null, eid = ed && ed.video_id;
+      if ((eid && eid !== j.id) || et < (j.et0 != null ? j.et0 : j.handPos) - 0.5) crossRecover(j, now);
+    }
+    if (echo.speaking) {
+      var x = j.S ? Math.max(0, (et - j.et0) / j.S) : 0;
       if (es === 2 && st !== 2 && now - echo.userPause > 2000) {
         // le compte a mis l'écho en pause : repli durable, mais le titre en cours remonte en courbe
         echo.failed = 'compte';
         store(ECHO_KEY, JSON.stringify({ reason: 'compte', at: now }));
         crossRecover(j, now);
-      } else if (x >= 0.995) echoHalt();
-      else if (es === 0 || et >= j.end - 0.05 || (es === 3 && now - (j.stall || (j.stall = now)) > 2000)) {
+      } else if (x >= 0.98) echoHalt();
+      // un peu avant la fin du fichier : arrêté avant que YouTube ne fasse quoi que ce soit après
+      else if (es === 0 || et >= j.end - 0.3 || (es === 3 && now - (j.stall || (j.stall = now)) > 2000)) {
         // l'écho s'est arrêté avant la fin de sa courbe (fin de fichier, chargement bloqué)
         crossRecover(j, now);
       } else {
@@ -895,6 +920,9 @@
   setInterval(function () {
     try {
       var p = player();
+      // note en continu le dernier instant où la musique s'entendait (voir heardState)
+      if (p && p.getPlayerState) heardState(p);
+      echoWatch();
       if (!p || !p.getPlayerState || !auto.on || adPlaying(p)) return;
       var st = p.getPlayerState(), d = p.getVideoData ? p.getVideoData() : {}, id = d && d.video_id;
       if (!id) return;
@@ -910,6 +938,19 @@
   }, 500);
 
   // ——— Lecture ———
+  // État de lecture annoncé à iBox. YouTube Music annonce -1 (« non démarré ») pendant une
+  // publicité, alors qu'elle s'entend, et pendant le passage d'un titre au suivant. iBox ne fait
+  // taire sa musique des menus que pendant une lecture (1 ou 3) : elle revenait donc par-dessus la
+  // publicité ou le titre suivant (« deux musiques en même temps »). Une publicité qui joue compte
+  // comme une lecture, et un court passage (4 s au plus) comme un chargement.
+  var heardAt = 0;
+  function heardState(p) {
+    var st = p.getPlayerState(), v = document.querySelector('video'), now = Date.now();
+    if (st === 1 || st === 3) { heardAt = now; return st; }
+    if (adPlaying(p) && v && !v.paused) { heardAt = now; return 1; }
+    if ((st === -1 || st === 0 || st === 5) && heardAt && now - heardAt < 4000) return 3;
+    return st;
+  }
   function state() {
     var p = player(), m = navigator.mediaSession && navigator.mediaSession.metadata;
     fadeRecover(p);
@@ -922,7 +963,7 @@
       visibility: document.visibilityState,
       ready: !!(p && p.getPlayerState),
       // -1 non démarré, 0 fini, 1 lecture, 2 pause, 3 chargement, 5 en file
-      playerState: p && p.getPlayerState ? p.getPlayerState() : null,
+      playerState: p && p.getPlayerState ? heardState(p) : null,
       videoId: data.video_id || null,
       playlistId: p && p.getPlaylistId ? p.getPlaylistId() || null : null,
       title: (m && m.title) || data.title || null,
