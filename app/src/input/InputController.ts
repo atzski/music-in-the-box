@@ -80,7 +80,9 @@ class InputControllerImpl {
   focusables(): HTMLElement[] {
     const root = this.root();
     if (!root) return [];
-    return Array.from(root.querySelectorAll<HTMLElement>("[data-focusable]")).filter(
+    // `data-nav-inner` : un lien à l'intérieur d'un élément (nom d'artiste dans une ligne) ; il
+    // garde l'activation (OK, Entrée) mais n'est pas une destination des flèches
+    return Array.from(root.querySelectorAll<HTMLElement>("[data-focusable]:not([data-nav-inner])")).filter(
       (el) => !(el as HTMLButtonElement).disabled && el.offsetParent !== null && el.getAttribute("aria-hidden") !== "true",
     );
   }

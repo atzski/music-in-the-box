@@ -223,6 +223,59 @@ describe("Music in the Box : réponses YouTube Music", () => {
     expect(P5.timedLyrics({ contents: { messageRenderer: {} } })).toBeNull();
   });
 
+  it("file réelle : titre lancé seul (suite automatique proposée) et radio (sans fin)", () => {
+    type Info = { items: { videoId: string; selected: boolean; artists: { name: string; id: string | null }[] }[]; more: boolean; automix: { playlistId: string; params: string | null } | null };
+    const P7 = P as unknown as { queueInfo: (j: unknown) => Info };
+    const read = (f: string) => P7.queueInfo(JSON.parse(readFileSync(join(__dirname, "fixtures", f), "utf8")));
+    const solo = read("next-titre-seul.json");
+    // la file s'arrête après ce titre ; YouTube Music propose sa suite (« automix »)
+    expect(solo.items.map((q) => q.selected)).toEqual([true]);
+    expect(solo.more).toBe(false);
+    expect(solo.automix?.playlistId).toMatch(/^RDAMVM/);
+    const radio = read("next-radio-titre.json");
+    expect(radio.items.length).toBeGreaterThan(20);
+    expect(radio.more).toBe(true);
+    expect(radio.automix).toBeNull();
+    // chaque artiste d'un titre à plusieurs artistes, avec sa page
+    const duo = radio.items.find((q) => q.artists.length > 1)!;
+    expect(duo.artists.every((a) => /^UC/.test(a.id ?? ""))).toBe(true);
+    expect(radio.items.every((q) => q.artists.length > 0)).toBe(true);
+  });
+
+  it("artistes d'un titre trouvé : un lien par artiste, aucun pour une chaîne d'utilisateur", () => {
+    type T = { artists: { name: string; id: string | null }[] };
+    const list = (P as unknown as { tracks: (j: unknown) => T[] }).tracks(JSON.parse(readFileSync(join(__dirname, "fixtures", "search-daft-punk.json"), "utf8")));
+    const linked = list.flatMap((t) => t.artists).filter((a) => a.id);
+    expect(linked.length).toBeGreaterThan(0);
+    expect(linked.every((a) => /^UC/.test(a.id!))).toBe(true);
+    // une vidéo de fan : la chaîne est nommée, sans page d'artiste
+    expect(list.some((t) => t.artists.some((a) => a.id === null))).toBe(true);
+    const json = { contents: [item("v1", "Son de fan", [run("Naf' Manson", "MUSIC_PAGE_TYPE_USER_CHANNEL"), run(" • "), run("5:21")])] };
+    expect((P as unknown as { tracks: (j: unknown) => T[] }).tracks(json)[0].artists).toEqual([{ name: "Naf' Manson", id: null }]);
+  });
+
+  it("page d'artiste réelle : tous ses titres, ses carrousels, ses auditeurs et sa présentation", () => {
+    type Card = { kind: string; id: string; title: string; subtitle: string; thumbnail: string | null; year?: string | null; playlistId?: string };
+    type Page = { name: string; subtitle: string | null; tracks: { videoId: string }[]; songsId: string | null; sections: { title: string; items: Card[] }[]; about: string | null };
+    const P6 = P as unknown as { artistPage: (j: unknown) => Page };
+    const page = P6.artistPage(JSON.parse(readFileSync(join(__dirname, "fixtures", "artist-travis-scott.json"), "utf8")));
+    expect(page.name).toBe("Travis Scott");
+    expect(page.subtitle).toMatch(/auditeurs/);
+    expect(page.tracks).toHaveLength(5);
+    // « Tout afficher » : la liste de lecture de tous ses titres
+    expect(page.songsId).toMatch(/^VL/);
+    const by = (title: string) => page.sections.find((s) => s.title === title);
+    expect(page.sections.map((s) => s.title)).toEqual(expect.arrayContaining(["Albums", "Singles et EP", "Vidéos", "Vous aimerez peut-être aussi"]));
+    expect(by("Albums")!.items.every((c) => c.kind === "album" && /^MPRE/.test(c.id) && !!c.year)).toBe(true);
+    expect(by("Vidéos")!.items.every((c) => c.kind === "video" && !!c.id)).toBe(true);
+    expect(by("Vous aimerez peut-être aussi")!.items.every((c) => c.kind === "artist" && /^UC/.test(c.id))).toBe(true);
+    const lists = page.sections.flatMap((s) => s.items).filter((c) => c.kind === "playlist");
+    expect(lists.length).toBeGreaterThan(0);
+    expect(lists.every((c) => c.playlistId && !c.playlistId.startsWith("VL"))).toBe(true);
+    expect(page.sections.flatMap((s) => s.items).every((c) => c.title && c.thumbnail)).toBe(true);
+    expect(page.about?.length).toBeGreaterThan(100);
+  });
+
   // réponses réelles enregistrées : chaque titre a un identifiant, un titre et un artiste
   const fixtures = join(__dirname, "fixtures");
   const files = existsSync(fixtures) ? readdirSync(fixtures).filter((f) => f.endsWith(".json")) : [];

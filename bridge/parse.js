@@ -46,6 +46,15 @@ var ytmParse = (function () {
     return (c && c.pageType) || '';
   }
 
+  // Artistes liés d'un texte : chacun avec l'identifiant de sa page (UC…) quand YouTube Music le
+  // donne (page d'artiste) ; une chaîne d'utilisateur (vidéo importée, son de fan) n'en a pas.
+  function artistRefs(runs) {
+    return runs.filter(function (x) { return /ARTIST|USER_CHANNEL/.test(pageType(x)); }).map(function (x) {
+      var id = /ARTIST/.test(pageType(x)) ? x.navigationEndpoint.browseEndpoint.browseId : null;
+      return { name: x.text, id: id && /^UC/.test(id) ? id : null };
+    });
+  }
+
   // Une ligne de liste (recherche, playlist) : titre, artistes, album, durée.
   function track(r) {
     var cols = (r.flexColumns || []).map(function (c) {
@@ -76,6 +85,7 @@ var ytmParse = (function () {
       videoId: videoId,
       title: text(cols[0]),
       artist: artists.length ? artists.join(', ') : guess || parts[0] || '',
+      artists: artistRefs(runs),
       album: album,
       duration: duration,
       thumbnail: thumb(r.thumbnail)
@@ -114,11 +124,47 @@ var ytmParse = (function () {
     return out;
   }
 
-  // Page d'un artiste : nom, photo, titres populaires (première étagère de titres).
+  // Une carte de carrousel (page d'artiste) : album ou single (MPRE…), playlist (VL…), artiste
+  // (UC…) ou vidéo. null pour tout le reste (rien d'inconnu n'est proposé à l'écran).
+  function card(r) {
+    var ne = r.navigationEndpoint || {}, b = ne.browseEndpoint, w = ne.watchEndpoint;
+    var id = (b && b.browseId) || '';
+    var kind = w && w.videoId ? 'video' : /^MPRE/.test(id) ? 'album' : /^VL/.test(id) ? 'playlist' : /^UC/.test(id) ? 'artist' : null;
+    var title = text(r.title);
+    if (!kind || !title) return null;
+    var out = { kind: kind, id: kind === 'video' ? w.videoId : id, title: title, subtitle: text(r.subtitle), thumbnail: thumb(r.thumbnailRenderer) };
+    if (kind === 'album') {
+      var info = albumInfo((r.subtitle && r.subtitle.runs) || []);
+      out.year = info.year; out.type = info.type; out.artist = info.artist;
+    }
+    if (kind === 'playlist') out.playlistId = id.slice(2);
+    return out;
+  }
+
+  // Page d'un artiste : nom, photo, auditeurs, titres populaires et la liste de tous ses titres
+  // (« Tout afficher »), puis chaque carrousel tel que YouTube Music le montre (albums, singles,
+  // vidéos, playlists, artistes proches…), et sa présentation.
   function artistPage(json) {
     var h = find(json, 'musicImmersiveHeaderRenderer') || find(json, 'musicVisualHeaderRenderer') || find(json, 'musicResponsiveHeaderRenderer') || {};
     var shelf = find(json, 'musicShelfRenderer');
-    return { name: text(h.title), thumbnail: thumb(h.thumbnail) || thumb(h.foregroundThumbnail), tracks: shelf ? tracks(shelf) : [] };
+    var more = shelf && ((shelf.bottomEndpoint && shelf.bottomEndpoint.browseEndpoint) || (find(shelf.title, 'browseEndpoint')));
+    var songs = more && /^VL/.test(more.browseId || '') ? more.browseId : null;
+    var sections = collect(json, 'musicCarouselShelfRenderer').map(function (c) {
+      var hd = c.header && c.header.musicCarouselShelfBasicHeaderRenderer;
+      var items = (c.contents || []).map(function (x) { return x.musicTwoRowItemRenderer ? card(x.musicTwoRowItemRenderer) : null; }).filter(Boolean);
+      return { title: text(hd && hd.title), items: items };
+    }).filter(function (s) { return s.title && s.items.length; });
+    var about = find(json, 'musicDescriptionShelfRenderer');
+    var aboutText = (about && text(about.description)) || text(h.description) || '';
+    return {
+      name: text(h.title),
+      thumbnail: thumb(h.thumbnail) || thumb(h.foregroundThumbnail),
+      subtitle: text(h.monthlyListenerCount) || null,
+      tracks: shelf ? tracks(shelf) : [],
+      songsId: songs,
+      sections: sections,
+      about: aboutText.replace(/\r/g, '').trim() || null
+    };
   }
 
   // Albums d'une recherche : lignes qui mènent à une page d'album (identifiant MPRE…), et
@@ -233,10 +279,14 @@ var ytmParse = (function () {
       seen[r.videoId] = 1;
       var by = (r.shortBylineText && r.shortBylineText.runs) || (r.longBylineText && r.longBylineText.runs) || [];
       var w = r.navigationEndpoint && r.navigationEndpoint.watchEndpoint;
+      // artistes liés : la première partie de la ligne longue (avant « • vues »)
+      var long = (r.longBylineText && r.longBylineText.runs) || [], head = [];
+      for (var k = 0; k < long.length && !/^s*•s*$/.test(long[k].text); k++) head.push(long[k]);
       out.push({
         videoId: r.videoId,
         title: text(r.title),
         artist: by.map(function (x) { return x.text; }).join('').split(SEP)[0] || '',
+        artists: artistRefs(head),
         duration: text(r.lengthText) || null,
         thumbnail: thumb(r.thumbnail),
         selected: !!r.selected,
@@ -245,6 +295,21 @@ var ytmParse = (function () {
       });
     });
     return out;
+  }
+
+  // File (`next`) et ce qu'il y a au-delà : `more` quand la file continue (radio sans fin, page
+  // suivante), et la suite automatique que YouTube Music propose quand elle s'arrête (« automix »,
+  // RDAMVM…, lue par son lecteur web à la fin de la file ; le pont s'en charge lui-même).
+  function queueInfo(json) {
+    var panel = find(json, 'playlistPanelRenderer') || {};
+    var mix = find(json, 'automixPreviewVideoRenderer');
+    var w = mix && find(mix, 'watchPlaylistEndpoint');
+    return {
+      items: queue(json),
+      playlistId: panel.playlistId || null,
+      more: !!(panel.isInfinite || panel.continuations),
+      automix: w && w.playlistId ? { playlistId: w.playlistId, params: w.params || null } : null
+    };
   }
 
   // Paroles, étape 1 (réponse `next`) : identifiant de la page de paroles du titre (MPLY…),
@@ -290,5 +355,5 @@ var ytmParse = (function () {
     return { lines: lines, times: times, source: (typeof source === 'string' && source.trim()) || null };
   }
 
-  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue, lyricsId: lyricsId, lyrics: lyrics, timedLyrics: timedLyrics };
+  return { text: text, collect: collect, track: track, tracks: tracks, artists: artists, artistPage: artistPage, albums: albums, albumPage: albumPage, playlists: playlists, continuation: continuation, playlistPage: playlistPage, likeStatus: likeStatus, queue: queue, queueInfo: queueInfo, lyricsId: lyricsId, lyrics: lyrics, timedLyrics: timedLyrics };
 })();

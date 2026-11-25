@@ -28,10 +28,18 @@ export interface NowPlaying {
 }
 
 /** Titre d'une playlist ou d'une recherche (YouTube Music). */
+/** Un artiste d'un titre ; `id` (UC…) absent quand il n'a pas de page (chaîne d'utilisateur). */
+export interface ArtistRef {
+  name: string;
+  id: string | null;
+}
+
 export interface Track {
   videoId: string;
   title: string;
   artist: string;
+  /** Chaque artiste séparément, avec sa page (pont 7 et plus). */
+  artists?: ArtistRef[];
   album: string | null;
   duration: string | null;
   thumbnail: string | null;
@@ -45,10 +53,41 @@ export interface Artist {
   thumbnail: string | null;
 }
 
+/** Une carte d'un carrousel de la page d'artiste : album ou single, playlist, artiste, vidéo. */
+export interface ArtistCard {
+  kind: "album" | "playlist" | "artist" | "video";
+  /** MPRE… (album), VL… (playlist), UC… (artiste), identifiant de vidéo. */
+  id: string;
+  title: string;
+  subtitle: string;
+  thumbnail: string | null;
+  /** Album : année et type (« Single », « EP » ; null pour un album). */
+  year?: string | null;
+  type?: string | null;
+  artist?: string;
+  /** Playlist : identifiant à lire (sans le préfixe VL). */
+  playlistId?: string;
+}
+
 export interface ArtistPage {
   name: string;
   thumbnail: string | null;
+  /** Titres populaires (les cinq de l'en-tête). */
   tracks: Track[];
+  /** Les champs suivants viennent du pont 6 ; un pont plus ancien ne rend que les trois premiers. */
+  /** « 94,2 M auditeurs/mois ». */
+  subtitle?: string | null;
+  /** Liste de lecture de tous ses titres (« Tout afficher », VL…). */
+  songsId?: string | null;
+  /** Carrousels tels que YouTube Music les montre : « Albums », « Singles et EP », « Vidéos »… */
+  sections?: { title: string; items: ArtistCard[] }[];
+  /** Présentation de l'artiste. */
+  about?: string | null;
+}
+
+/** Une carte d'album ouverte comme un album trouvé par la recherche. */
+export function cardAlbum(c: ArtistCard): Album {
+  return { id: c.id, title: c.title, artist: c.artist ?? "", year: c.year ?? null, type: c.type ?? null, thumbnail: c.thumbnail };
 }
 
 /** Album trouvé par la recherche (YouTube Music). */
@@ -84,6 +123,10 @@ export interface QueueItem {
   videoId: string;
   title: string;
   artist: string;
+  /** Chaque artiste séparément, avec sa page (pont 7 et plus). */
+  artists?: ArtistRef[];
+  /** Suite automatique (titres proches ajoutés quand la file s'arrête), pont 7 et plus. */
+  auto?: boolean;
   duration: string | null;
   thumbnail: string | null;
   selected: boolean;
@@ -186,6 +229,176 @@ export function seekBy(positionMs: number, steps: number, durationMs: number): n
   return Math.max(0, Math.min(max, Math.round(positionMs + steps * SEEK_STEP_MS)));
 }
 
+// ——— Fondus entre les titres ———
+// Fondu enchaîné : le titre suivant démarre pendant que l'autre finit. Le lecteur de YouTube Music
+// n'en joue qu'un à la fois ; le pont (`bridge.js`) charge donc un second lecteur caché, « l'écho »,
+// qui finit l'ancien titre pendant que le lecteur principal monte avec le suivant. Quand l'écho ne
+// peut pas servir (publicités, compte qui refuse deux lectures), le pont fait un fondu simple :
+// baisse, suivant lancé un peu avant la fin, montée. Ici : les réglages, les courbes et le
+// découpage d'une durée ; le pont ne fait qu'appliquer ce plan à la position des titres.
+
+/** Durée de fondu la plus longue (s). 0 : désactivé. */
+export const FADE_MAX_S = 12;
+/** Fondu court d'un passage manuel (suivant, précédent, autre titre), en ms. */
+export const FADE_QUICK_MS = 250;
+/** Fin de titre sautée au plus par l'enchaînement anticipé (ms). */
+export const FADE_CUT_MAX_MS = 2000;
+/** Transitions réglées à part gardées au plus (les plus anciennes sortent). */
+export const MAX_TRANSITIONS = 100;
+
+export interface FadeSettings {
+  /** Durée générale du fondu (s) ; 0 : désactivé. */
+  seconds: number;
+  /** Transitions réglées à part : titre qui finit → { titre qui suit, durée (0 : aucun fondu) }. */
+  pairs: Record<string, { to: string; seconds: number }>;
+}
+
+export const NO_FADE: FadeSettings = { seconds: 0, pairs: {} };
+
+/** Durée de fondu valide : un nombre entier de secondes, de 0 à `FADE_MAX_S`. */
+export function clampFade(seconds: unknown): number {
+  const n = Math.round(Number(seconds));
+  return Number.isFinite(n) ? Math.max(0, Math.min(FADE_MAX_S, n)) : 0;
+}
+
+/** Réglages relus du stockage : tout ce qui n'a pas la bonne forme est écarté. */
+export function parseFade(raw: string | null): FadeSettings {
+  try {
+    const v: unknown = JSON.parse(raw ?? "null");
+    if (!v || typeof v !== "object") return NO_FADE;
+    const { seconds, pairs } = v as { seconds?: unknown; pairs?: unknown };
+    const kept: FadeSettings["pairs"] = {};
+    if (pairs && typeof pairs === "object") {
+      for (const [from, p] of Object.entries(pairs as Record<string, { to?: unknown; seconds?: unknown } | null>).slice(-MAX_TRANSITIONS)) {
+        if (from && p && typeof p.to === "string" && p.to) kept[from] = { to: p.to, seconds: clampFade(p.seconds) };
+      }
+    }
+    return { seconds: clampFade(seconds), pairs: kept };
+  } catch {
+    return NO_FADE;
+  }
+}
+
+/**
+ * Courbe d'un fondu : gain (0 à 1) pour un avancement `x` de 0 (silence) à 1 (plein volume).
+ * Le volume du lecteur est une amplitude, que l'oreille n'entend pas en ligne droite : une
+ * rampe droite paraît tomber d'un coup à la fin. Au carré, la baisse s'entend régulière.
+ */
+export function fadeCurve(x: number): number {
+  const c = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
+  return c * c;
+}
+
+/** La courbe en `steps` segments, telle qu'envoyée au pont (qui relie les points). */
+export function fadeCurveTable(steps = 16): number[] {
+  return Array.from({ length: steps + 1 }, (_, i) => Math.round(fadeCurve(i / steps) * 10000) / 10000);
+}
+
+/**
+ * Courbe du fondu enchaîné : gain du titre qui arrive pour un avancement `x` de 0 à 1 ; le titre qui
+ * part suit la même courbe à rebours (`crossCurve(1 - x)`). Sinus et cosinus : la somme des
+ * puissances (carrés des gains) reste à 1, le volume perçu ne creuse pas au milieu.
+ */
+export function crossCurve(x: number): number {
+  const c = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
+  return Math.sin((c * Math.PI) / 2);
+}
+
+/** La courbe du fondu enchaîné en `steps` segments, telle qu'envoyée au pont. */
+export function crossCurveTable(steps = 32): number[] {
+  return Array.from({ length: steps + 1 }, (_, i) => Math.round(crossCurve(i / steps) * 10000) / 10000);
+}
+
+/**
+ * Découpage d'un fondu (ms). Fondu enchaîné : `overlap`, le temps où les deux titres jouent
+ * ensemble. Fondu simple (repli) : sortie du titre qui finit, fin sautée, entrée du suivant.
+ */
+export interface FadePlan {
+  overlap: number;
+  out: number;
+  into: number;
+  cut: number;
+}
+
+/**
+ * Plan d'un fondu de `seconds` secondes. Enchaîné : les deux titres jouent ensemble toute la
+ * durée. Repli : la moitié pour la sortie, la moitié pour l'entrée, et le titre suivant lancé un
+ * peu avant la fin (un quart de la durée, 2 s au plus). Null : pas de fondu.
+ */
+export function fadePlan(seconds: number): FadePlan | null {
+  const total = clampFade(seconds) * 1000;
+  if (!total) return null;
+  return { overlap: total, out: total / 2, into: total / 2, cut: Math.min(total / 4, FADE_CUT_MAX_MS) };
+}
+
+/** Durée propre à la transition `from` → `to` ; null : elle suit le réglage général. */
+export function transitionFade(settings: FadeSettings, from: string, to: string): number | null {
+  const p = settings.pairs[from];
+  return p && p.to === to ? p.seconds : null;
+}
+
+/** Règle la transition `from` → `to` (null : la rend au réglage général). */
+export function setTransitionFade(settings: FadeSettings, from: string, to: string, seconds: number | null): FadeSettings {
+  const { [from]: _old, ...rest } = settings.pairs;
+  if (seconds === null) return { ...settings, pairs: rest };
+  // remise en queue : la plus récemment réglée sort en dernier
+  const pairs = Object.fromEntries([...Object.entries(rest), [from, { to, seconds: clampFade(seconds) }] as const].slice(-MAX_TRANSITIONS));
+  return { ...settings, pairs };
+}
+
+/**
+ * Valeur suivante (`dir` 1) ou précédente (-1) du réglage. Général : 0 (désactivé) à 12 s.
+ * Transition (`own`) : d'abord null (suit le réglage général), puis 0 (aucun fondu) à 12 s.
+ */
+export function stepFade(value: number | null, dir: 1 | -1, own = false): number | null {
+  if (value === null) return dir > 0 ? 0 : null;
+  const next = clampFade(value) + dir;
+  if (next < 0) return own ? null : 0;
+  return Math.min(FADE_MAX_S, next);
+}
+
+/**
+ * État du fondu enchaîné rendu par le pont : « ok », ou la raison du repli sur le fondu simple.
+ * « compte » : YouTube Music a mis une lecture en pause quand la seconde a démarré ; « pub » : le
+ * second lecteur reçoit des publicités ; « indisponible » : il n'a pas pu se charger.
+ */
+export type CrossStatus = "ok" | "compte" | "pub" | "indisponible";
+
+/** Note du panneau quand le fondu enchaîné se replie ; null : rien à dire. */
+export function crossNote(status: CrossStatus | null | undefined): string | null {
+  if (status === "compte") return "Fondu simple : ce compte ne permet qu’une lecture à la fois.";
+  if (status === "pub") return "Fondu simple : les publicités empêchent le fondu enchaîné.";
+  if (status === "indisponible") return "Fondu simple : le second lecteur n’a pas pu démarrer.";
+  return null;
+}
+
+/** Ce que le pont reçoit : tout est déjà calculé, il n'a plus qu'à suivre la position. */
+export interface FadeConfig {
+  quick: number;
+  /** Fondu enchaîné demandé (le pont se replie seul sur le fondu simple s'il ne peut pas le faire). */
+  cross: boolean;
+  /** Courbe du fondu enchaîné (`crossCurve`) ; `curve` : celle du fondu simple. */
+  rise: number[];
+  curve: number[];
+  base: FadePlan | null;
+  pairs: Record<string, { to: string; plan: FadePlan | null }>;
+}
+
+/** Réglages → commande `fade` du pont. Null : aucun fondu nulle part (le pont s'endort). */
+export function fadeConfig(settings: FadeSettings): FadeConfig | null {
+  const base = fadePlan(settings.seconds);
+  const pairs: FadeConfig["pairs"] = {};
+  let any = !!base;
+  for (const [from, p] of Object.entries(settings.pairs)) {
+    const plan = fadePlan(p.seconds);
+    // sans fondu général, une transition « aucun fondu » ne change rien : inutile de l'envoyer
+    if (!plan && !base) continue;
+    pairs[from] = { to: p.to, plan };
+    if (plan) any = true;
+  }
+  return any ? { quick: FADE_QUICK_MS, cross: true, rise: crossCurveTable(), curve: fadeCurveTable(), base, pairs } : null;
+}
+
 export interface MusicState {
   now: NowPlaying | null;
   /** Heure de l'instantané (ms) : la position avance d'elle-même entre deux lectures. */
@@ -263,6 +476,16 @@ export const music = {
   lyrics: (videoId: string) => ytm<Lyrics | null>("lyrics", { videoId }),
   /** Lance un titre, une playlist, ou une playlist à partir d'un titre. */
   play: (item: { videoId?: string; playlistId?: string; index?: number }) => ytm<boolean>("playItem", item),
+  /**
+   * Fondus entre les titres (pont 5 et plus ; un pont plus ancien rejette « commande-inconnue »).
+   * `cross` (pont 6) : « ok » quand le fondu enchaîné est possible, sinon la raison du repli.
+   */
+  fade: (settings: FadeSettings) => ytm<{ fade: boolean; cross?: CrossStatus | null } | null>("fade", fadeConfig(settings)),
+  /**
+   * Suite automatique quand la file s'arrête (titres proches, comme « Lecture automatique » de
+   * YouTube Music), activée par défaut. Pont 7 et plus ; un pont plus ancien rejette « commande-inconnue ».
+   */
+  autoplay: (on: boolean) => ytm<{ autoplay: boolean }>("autoplay", { on }),
 };
 
 /**

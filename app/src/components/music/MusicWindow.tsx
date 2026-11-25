@@ -1,11 +1,12 @@
 import { EASE as EASES, SPRING, TWEEN } from "@/motion/tokens";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import { animate, AnimatePresence, motion, useAnimationFrame, useMotionValue, useSpring, useTransform } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DEFAULT_POSITION, compactSize, formatTime, loadPlaylist, lyricsLineAt, lyricsProgress, lyricsSynced, music, parseLaunches, placeCard, positionAt, positionOf, pushLaunch, radioOf, seekBy, upNext, type Album, type AlbumPage, type Artist, type ArtistPage, type Launch, type Lyrics, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
+import { DEFAULT_POSITION, FADE_MAX_S, cardAlbum, compactSize, crossNote, formatTime, loadPlaylist, lyricsLineAt, lyricsProgress, lyricsSynced, music, parseFade, parseLaunches, placeCard, positionAt, positionOf, pushLaunch, radioOf, seekBy, setTransitionFade, stepFade, transitionFade, upNext, type Album, type AlbumPage, type Artist, type ArtistCard, type ArtistPage, type ArtistRef, type CrossStatus, type FadeSettings, type Launch, type Lyrics, type MusicAction, type MusicState, type Playlist, type QueueItem, type Track } from "@/services/musicBox";
 import { sound } from "@/services/sound";
 import { Icon, type IconName } from "@/components/ui/Icon";
+import { Switch } from "@/components/ui/Switch";
 import { PadKeyboard } from "@/components/shell/PadKeyboard";
 import { input } from "@/input/InputController";
 import { useSettings } from "@/services/settings";
@@ -19,6 +20,9 @@ const BIG_W = 520;
 const BIG_H_MAX = 780;
 const RECENT_KEY = "ibox.music.recent";
 const LAUNCHES_KEY = "ibox.music.launches";
+const FADE_KEY = "ibox.music.fade";
+/** Suite automatique : « 0 » quand elle est coupée (activée par défaut). */
+const AUTOPLAY_KEY = "ibox.music.autoplay";
 /** « Titres aimés » : la liste que tout compte YouTube Music possède. */
 const LIKED_ID = "LM";
 const EASE = EASES.out;
@@ -84,6 +88,36 @@ function saveLaunch(launch: Launch): void {
   }
 }
 
+function readFade(): FadeSettings {
+  try {
+    return parseFade(localStorage.getItem(FADE_KEY));
+  } catch {
+    return parseFade(null);
+  }
+}
+function readAutoplay(): boolean {
+  try {
+    return localStorage.getItem(AUTOPLAY_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+function saveAutoplay(on: boolean): void {
+  try {
+    if (on) localStorage.removeItem(AUTOPLAY_KEY);
+    else localStorage.setItem(AUTOPLAY_KEY, "0");
+  } catch {
+    /* stockage indisponible : le choix vaut jusqu'à la fermeture d'iBox */
+  }
+}
+function saveFade(fade: FadeSettings): void {
+  try {
+    localStorage.setItem(FADE_KEY, JSON.stringify(fade));
+  } catch {
+    /* stockage indisponible : le réglage vaut jusqu'à la fermeture d'iBox */
+  }
+}
+
 /** Ce qu'il faut retenir d'une playlist lancée pour la reproposer. */
 const launchOf = (list: Playlist): Launch => ({ playlistId: list.playlistId, title: list.title, subtitle: list.subtitle, thumbnail: list.thumbnail });
 
@@ -122,11 +156,19 @@ export function MusicWindow() {
   const [listsError, setListsError] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ list: Playlist; tracks: Track[] | null } | null>(null);
   const [search, setSearch] = useState<SearchState>({ query: "", kind: "songs", songs: null, videos: null, artists: null, albums: null, loading: false });
-  const [artist, setArtist] = useState<{ id: string; preview: Artist; page: ArtistPage | null } | null>(null);
-  const [album, setAlbum] = useState<{ id: string; preview: Album; page: AlbumPage | null } | null>(null);
+  const [artist, setArtist] = useState<ArtistView | null>(null);
+  const [album, setAlbum] = useState<AlbumView | null>(null);
   /** Paroles du titre affiché dans la vue Paroles (`entry` absent : en cours de lecture). */
   const [lyrics, setLyrics] = useState<{ id: string; entry?: LyricsEntry } | null>(null);
   const [launches, setLaunches] = useState<Launch[]>(readLaunches);
+  /** Fondus entre les titres ; `fadeOld` : le plugin installé est trop ancien pour les faire. */
+  const [fade, setFade] = useState<FadeSettings>(readFade);
+  const [fadeOld, setFadeOld] = useState(false);
+  /** Fondu enchaîné : « ok », ou la raison du repli sur le fondu simple (rendue par le pont). */
+  const [cross, setCross] = useState<CrossStatus | null>(null);
+  /** Suite automatique ; `autoplayOld` : le plugin installé ne la connaît pas (réglage caché). */
+  const [autoplay, setAutoplay] = useState(readAutoplay);
+  const [autoplayOld, setAutoplayOld] = useState(false);
   const [screen, setScreen] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [miniH, setMiniH] = useState(520);
   const [moving, setMoving] = useState<{ left: number; top: number } | null>(null);
@@ -200,6 +242,48 @@ export function MusicWindow() {
       alive = false;
     };
   }, [youtube, n?.id]);
+
+  // fondus entre les titres : réglés ici, faits par le pont (qui les garde pour continuer
+  // panneau fermé) ; renvoyés dès qu'un titre YouTube Music joue, à chaque changement de réglage
+  // et de titre (le pont rend alors l'état du fondu enchaîné, qui peut s'être replié entre-temps)
+  const fadeTrack = youtube ? (n?.id ?? null) : null;
+  useEffect(() => {
+    if (!fadeTrack) return;
+    let alive = true;
+    music.fade(fade).then(
+      (r) => {
+        if (!alive) return;
+        setFadeOld(false);
+        setCross(r?.cross ?? null);
+      },
+      (e) => alive && e === "commande-inconnue" && setFadeOld(true),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [fadeTrack, fade]);
+  // suite automatique : le choix est renvoyé au pont (qui le garde) à chaque titre et à chaque changement
+  useEffect(() => {
+    if (!fadeTrack) return;
+    let alive = true;
+    music.autoplay(autoplay).then(
+      () => alive && setAutoplayOld(false),
+      (e) => alive && e === "commande-inconnue" && setAutoplayOld(true),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [fadeTrack, autoplay]);
+  const changeAutoplay = useCallback((on: boolean) => {
+    setAutoplay(on);
+    saveAutoplay(on);
+    // la file affichée change : la suite y apparaît ou en disparaît
+    window.setTimeout(() => void music.queue().then(setQueue).catch(() => undefined), 300);
+  }, []);
+  const changeFade = useCallback((next: FadeSettings) => {
+    setFade(next);
+    saveFade(next);
+  }, []);
 
   // paroles : lues quand la vue est ouverte, à chaque nouveau titre ; gardées par titre
   const lyricsFor = view === "lyrics" && youtube && n?.id ? n.id : null;
@@ -313,8 +397,17 @@ export function MusicWindow() {
           return true;
         }
         if (artist) {
+          // d'un artiste proche, on revient à celui d'où l'on venait ; d'un nom cliqué ailleurs,
+          // à la vue où il était
           setDir(-1);
-          setArtist(null);
+          if (artist.back) setArtist(artist.back);
+          else {
+            setArtist(null);
+            if (artist.ret) {
+              setView(artist.ret.view);
+              setAlbum(artist.ret.album);
+            }
+          }
           return true;
         }
         if (detail) {
@@ -394,13 +487,21 @@ export function MusicWindow() {
     fetchTracks(list.id, show).catch(() => setDetail((d) => (d?.list.id === list.id ? { list, tracks: d.tracks ?? [] } : d)));
   }, []);
 
-  const openArtist = useCallback((a: Artist) => {
+  /** ``fromArtist`` : ouvert depuis la fiche d'un autre artiste (Retour y ramène). */
+  const openArtist = useCallback((a: Artist, fromArtist = false, ret: ArtistView["ret"] = null) => {
     setDir(1);
-    setArtist({ id: a.id, preview: a, page: null });
+    setArtist((prev) => ({ id: a.id, preview: a, page: null, songs: null, back: fromArtist ? prev : null, ret: fromArtist ? (prev?.ret ?? null) : ret }));
+    const mine = (x: ArtistView | null) => x?.id === a.id;
     music
       .artist(a.id)
-      .then((page) => setArtist((x) => (x?.id === a.id ? { ...x, page } : x)))
-      .catch(() => setArtist((x) => (x?.id === a.id ? { ...x, page: { name: a.name, thumbnail: a.thumbnail, tracks: [] } } : x)));
+      .then((page) => {
+        setArtist((x) => (mine(x) ? { ...x!, page } : x));
+        // tous ses titres (« Tout afficher » de YouTube Music), page par page
+        if (page.songsId) {
+          void loadPlaylist(page.songsId, (songs) => setArtist((x) => (mine(x) ? { ...x!, songs } : x)), () => true).catch(() => undefined);
+        }
+      })
+      .catch(() => setArtist((x) => (mine(x) ? { ...x!, page: { name: a.name, thumbnail: a.thumbnail, tracks: [] } } : x)));
   }, []);
 
   const openAlbum = useCallback((a: Album) => {
@@ -551,10 +652,28 @@ export function MusicWindow() {
     target.addEventListener("pointerup", onUp);
   };
 
+  // nom d'artiste cliqué n'importe où (lecteur, listes) : sa fiche s'ouvre dans le panneau, et
+  // Retour ramène à la vue d'où l'on vient
+  const showArtist = useCallback(
+    (a: ArtistRef) => {
+      if (!a.id) return;
+      const onArtistPage = view === "search" && !!artist && !album;
+      if (compactSetting) setSetting("musicCompact", false);
+      setAlbum(null);
+      setView("search");
+      openArtist({ id: a.id, name: a.name, subtitle: "", thumbnail: null }, onArtistPage, onArtistPage ? null : { view, album });
+    },
+    [album, artist, compactSetting, openArtist, setSetting, view],
+  );
+  // artistes du titre en cours : ceux que la file donne pour lui (YouTube Music seulement)
+  const nowArtists = useMemo(() => (youtube && n ? queue.find((q) => q.videoId === n.id)?.artists : undefined), [queue, youtube, n?.id]);
+
   // clé et sens du contenu (pour des fondus orientés)
   const contentKey = view === "mini" ? (compact ? "compact" : "mini") : view === "search" && album ? `album-${album.id}` : view === "search" && artist ? `artist-${artist.id}` : view === "lists" && detail ? `list-${detail.list.id}` : view;
 
   return (
+    <ArtistOpen.Provider value={state?.youtube ? showArtist : null}>
+    <NowArtists.Provider value={nowArtists}>
     <div
       data-nav-root
       data-nav-main
@@ -620,6 +739,12 @@ export function MusicWindow() {
                             <QueueList
                               items={upNext(queue, 50)}
                               current={n}
+                              fade={fade}
+                              fadeOld={fadeOld}
+                              crossNote={fade.seconds || Object.keys(fade.pairs).length ? crossNote(cross) : null}
+                              autoplay={autoplayOld ? null : autoplay}
+                              onAutoplay={changeAutoplay}
+                              onFade={changeFade}
                               onPlay={(q) => void play({ videoId: q.videoId, playlistId: q.playlistId ?? undefined, index: q.index ?? undefined })}
                               onRadio={youtube && n ? () => void play({ videoId: n.id, playlistId: radioOf(n.id) }) : undefined}
                             />
@@ -629,7 +754,18 @@ export function MusicWindow() {
                             album ? (
                               <AlbumDetail album={album} current={n} onPlay={play} />
                             ) : artist ? (
-                              <ArtistDetail artist={artist} current={n} onPlay={(t) => void play({ videoId: t.videoId })} onRadio={(t) => void play({ videoId: t.videoId, playlistId: radioOf(t.videoId) })} />
+                              <ArtistDetail
+                                artist={artist}
+                                current={n}
+                                onPlay={(t, list, index) => void play(list ? { videoId: t.videoId, playlistId: list, index } : { videoId: t.videoId })}
+                                onRadio={(t) => void play({ videoId: t.videoId, playlistId: radioOf(t.videoId) })}
+                                onCard={(c) => {
+                                  if (c.kind === "album") openAlbum(cardAlbum(c));
+                                  else if (c.kind === "artist") openArtist({ id: c.id, name: c.title, subtitle: c.subtitle, thumbnail: c.thumbnail }, true);
+                                  else if (c.kind === "playlist" && c.playlistId) void play({ playlistId: c.playlistId });
+                                  else if (c.kind === "video") void play({ videoId: c.id });
+                                }}
+                              />
                             ) : (
                               <Search
                                 search={search}
@@ -682,6 +818,8 @@ export function MusicWindow() {
       </AnimatePresence>
       <PadKeyboard />
     </div>
+    </NowArtists.Provider>
+    </ArtistOpen.Provider>
   );
 }
 
@@ -917,7 +1055,7 @@ function CompactBar({ n, tint, live, act, onExpand, onMove, dragged }: {
                       </motion.div>
                     )}
                   </AnimatePresence>
-                  <Marquee text={n.artist} className="min-w-0 flex-1 text-[0.76rem] font-bold text-white/55" />
+                  <NowArtistLine text={n.artist} className="min-w-0 flex-1 text-[0.76rem] font-bold text-white/55" />
                 </div>
               </>
             ) : (
@@ -1098,11 +1236,15 @@ function ViewIcon({ view, size }: { view: Tab; size: number }) {
 }
 
 /** Onglets en icônes, pastille qui glisse (comme le sélecteur d'iBox). */
-function IconTabs<T extends string>({ value, onChange, items, small }: { value: T; onChange: (v: T) => void; items?: { value: T; label: string; tone: string; icon: ReactNode }[]; small?: boolean }) {
+/**
+ * Onglets en pastilles. `wide` : toute la largeur, chaque onglet avec son nom à côté de l'icône
+ * (filtres de la recherche, sous le champ).
+ */
+function IconTabs<T extends string>({ value, onChange, items, small, wide }: { value: T; onChange: (v: T) => void; items?: { value: T; label: string; tone: string; icon: ReactNode }[]; small?: boolean; wide?: boolean }) {
   const list = items ?? (TABS.map((t) => ({ ...t, icon: <ViewIcon view={t.value} size={20} /> })) as unknown as { value: T; label: string; tone: string; icon: ReactNode }[]);
   const id = small ? "music-subtab" : "music-tab";
   return (
-    <div role="tablist" className="inline-flex rounded-full bg-white/10 p-1">
+    <div role="tablist" className={`${wide ? "flex w-full" : "inline-flex"} rounded-full bg-white/10 p-1`}>
       {list.map((t) => {
         const active = t.value === value;
         return (
@@ -1120,7 +1262,7 @@ function IconTabs<T extends string>({ value, onChange, items, small }: { value: 
                 onChange(t.value);
               }
             }}
-            className={`ibox-focusable ${t.tone} relative grid place-items-center rounded-full transition-[color,transform] duration-150 [--ring-radius:999px] active:scale-90 ${small ? "h-9 w-12" : "h-10 w-14"} ${active ? "text-white" : "text-white/55 hover:text-white"}`}
+            className={`ibox-focusable ${t.tone} relative grid place-items-center rounded-full transition-[color,transform] duration-150 [--ring-radius:999px] active:scale-90 ${wide ? "h-9 min-w-0 flex-1 px-2" : small ? "h-9 w-12" : "h-10 w-14"} ${active ? "text-white" : "text-white/55 hover:text-white"}`}
           >
             {active && (
               <motion.span
@@ -1129,7 +1271,14 @@ function IconTabs<T extends string>({ value, onChange, items, small }: { value: 
                 className="absolute inset-0 rounded-full bg-[color-mix(in_srgb,var(--tone)_55%,transparent)] shadow-[inset_0_-3px_0_color-mix(in_srgb,var(--tone)_60%,transparent)]"
               />
             )}
-            <span className="relative">{t.icon}</span>
+            {wide ? (
+              <span className="relative flex min-w-0 items-center gap-1.5">
+                <span className="flex-none">{t.icon}</span>
+                <span className="truncate text-[0.8rem] font-bold">{t.label}</span>
+              </span>
+            ) : (
+              <span className="relative">{t.icon}</span>
+            )}
           </button>
         );
       })}
@@ -1166,7 +1315,7 @@ function Player({ n, tint, live, onSeek, act }: {
       <AnimatePresence mode="wait" initial={false}>
         <motion.div key={n.id} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.25, ease: EASE }} className="mt-4 w-full min-w-0 text-center">
           <Marquee text={n.title} center className="font-display text-[1.3rem] leading-tight font-semibold" />
-          <Marquee text={n.artist} center className="mt-1 text-[0.88rem] font-bold text-white/55" />
+          <NowArtistLine text={n.artist} center className="mt-1 text-[0.88rem] font-bold text-white/55" />
         </motion.div>
       </AnimatePresence>
 
@@ -1473,7 +1622,7 @@ function NowBar({ n, live, onToggle }: { n: NonNullable<MusicState["now"]>; live
       </div>
       <div className="min-w-0 flex-1">
         <Marquee text={n.title} className="text-[0.92rem] font-bold" />
-        <Marquee text={n.artist} className="text-[0.78rem] font-bold text-white/50" />
+        <NowArtistLine text={n.artist} className="text-[0.78rem] font-bold text-white/50" />
         <LiveProgress live={live} durationMs={n.durationMs} trackKey={n.id} compact />
       </div>
       <motion.button whileTap={{ scale: 0.86 }} type="button" data-focusable onClick={onToggle} aria-label={n.playing ? "Pause" : "Lecture"} title={n.playing ? "Pause" : "Lecture"} className="ibox-focusable grid size-10 flex-none place-items-center rounded-full bg-white/10 [--ring-radius:999px] hover:bg-white/20">
@@ -1566,25 +1715,122 @@ function Thumb({ src, fill, size, round }: { src: string | null; fill?: boolean;
 
 // ——— Listes ———
 
-function Row({ title, artist, duration, thumbnail, index, current, playing, first, round, onClick }: { title: string; artist: string; duration?: string | null; thumbnail: string | null; index: number; current?: boolean; playing?: boolean; first?: boolean; round?: boolean; onClick: () => void }) {
+/**
+ * Une ligne de liste. Ses noms d'artistes (pont 7) mènent chacun à la fiche de l'artiste : à la
+ * souris d'un clic, au clavier et à la manette par → depuis la ligne (puis ← → entre les noms,
+ * ↑ ↓ pour en sortir). Le reste de la ligne lance le titre.
+ */
+function Row({ title, artist, artists, duration, thumbnail, index, current, playing, first, round, onClick }: { title: string; artist: string; artists?: ArtistRef[]; duration?: string | null; thumbnail: string | null; index: number; current?: boolean; playing?: boolean; first?: boolean; round?: boolean; onClick: () => void }) {
+  const open = useContext(ArtistOpen);
+  const linked = !!open && !!artists?.some((a) => a.id);
   return (
-    <motion.button
-      type="button"
+    <motion.div
+      role="button"
+      tabIndex={0}
       data-focusable
+      data-row
+      data-nav-capture={linked ? "x" : undefined}
       data-autofocus={first || undefined}
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === " ") {
+          // comme un bouton : Espace lance le titre (et ne met pas la lecture en pause)
+          e.preventDefault();
+          onClick();
+        } else if (linked && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+          e.preventDefault();
+          e.stopPropagation();
+          const first = e.currentTarget.querySelector<HTMLElement>("[data-artist-link]");
+          if (e.key === "ArrowRight" && first) input.focus(first, { sound: true });
+          else input.dispatch(e.key === "ArrowRight" ? "right" : "left");
+        }
+      }}
       {...rise(index)}
       whileTap={{ scale: 0.98 }}
-      className={`ibox-focusable flex w-full items-center gap-3 rounded-2xl p-2 text-left transition-colors [--ring-radius:1rem] ${current ? "bg-white/12" : "hover:bg-white/10"}`}
+      className={`ibox-focusable flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-2xl p-2 text-left transition-colors [--ring-radius:1rem] ${current ? "bg-white/12" : "hover:bg-white/10"}`}
     >
       <Thumb src={thumbnail} size={44} round={round} />
       <div className="min-w-0 flex-1">
         <div className="truncate text-[0.9rem] font-bold">{title}</div>
-        {artist && <div className="truncate text-[0.78rem] font-bold text-white/50">{artist}</div>}
+        {artist && <ArtistLine artists={artists} text={artist} inner className="truncate text-[0.78rem] font-bold text-white/50" />}
       </div>
       {current && <Equalizer playing={!!playing} />}
       {duration && <span className="flex-none text-[0.75rem] font-bold tracking-[-0.04em] text-white/45 tabular-nums">{duration}</span>}
-    </motion.button>
+    </motion.div>
+  );
+}
+
+// ——— Noms d'artistes ———
+
+/** Ouvre la fiche d'un artiste (null : pas de YouTube Music, les noms restent du texte). */
+const ArtistOpen = createContext<((a: ArtistRef) => void) | null>(null);
+/** Artistes du titre en cours, tels que la file les donne (absent : on ne les connaît pas). */
+const NowArtists = createContext<ArtistRef[] | undefined>(undefined);
+
+/** Ligne d'artistes du titre en cours (lecteur, barre réduite, barre « en cours »). */
+function NowArtistLine({ text, center, className }: { text: string; center?: boolean; className?: string }) {
+  const artists = useContext(NowArtists);
+  const open = useContext(ArtistOpen);
+  if (!open || !artists?.some((a) => a.id)) return <Marquee text={text} center={center} className={className} />;
+  return <ArtistLine artists={artists} text={text} className={`truncate ${center ? "text-center" : ""} ${className ?? ""}`} />;
+}
+
+/**
+ * Noms d'artistes, chacun cliquable quand il a sa page (« A, B ») ; sans page (vidéo importée,
+ * chaîne d'utilisateur), le nom reste du texte, sans effet de lien. `inner` : dans une ligne
+ * cliquable (on y entre par → depuis la ligne, voir `Row`).
+ */
+function ArtistLine({ artists, text, inner, className }: { artists?: ArtistRef[]; text: string; inner?: boolean; className?: string }) {
+  const open = useContext(ArtistOpen);
+  const list = (artists ?? []).filter((a) => a.name);
+  if (!open || !list.some((a) => a.id)) return <div className={className}>{text}</div>;
+  const keys = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const row = e.currentTarget.closest<HTMLElement>("[data-row]");
+    if (!row) return;
+    const links = Array.from(row.querySelectorAll<HTMLElement>("[data-artist-link]"));
+    const i = links.indexOf(e.currentTarget);
+    const go = (el: HTMLElement) => input.focus(el, { sound: true });
+    if (e.key === "ArrowRight") i < links.length - 1 ? go(links[i + 1]) : (go(row), input.dispatch("right"));
+    else if (e.key === "ArrowLeft") go(i > 0 ? links[i - 1] : row);
+    else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      go(row);
+      input.dispatch(e.key === "ArrowUp" ? "up" : "down");
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  return (
+    <div className={className}>
+      {list.map((a, i) => (
+        <span key={`${a.name}-${i}`}>
+          {i > 0 && ", "}
+          {a.id ? (
+            <button
+              type="button"
+              data-focusable
+              data-artist-link
+              data-nav-inner={inner || undefined}
+              data-nav-capture={inner ? "xy" : undefined}
+              tabIndex={inner ? -1 : 0}
+              title={`Ouvrir la page de ${a.name}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                sound.play("select");
+                open(a);
+              }}
+              onKeyDown={inner ? keys : undefined}
+              // surlignage plutôt qu'anneau : la ligne tronquée rognerait un anneau
+              className="-mx-1 inline cursor-pointer rounded-md px-1 decoration-white/40 underline-offset-2 outline-none transition-colors hover:text-white hover:underline focus:bg-[color-mix(in_srgb,var(--accent)_38%,transparent)] focus:text-white"
+            >
+              {a.name}
+            </button>
+          ) : (
+            a.name
+          )}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -1647,7 +1893,7 @@ function PlaylistDetail({ detail, current, onPlay }: { detail: { list: Playlist;
             <p className="py-6 text-center text-[0.9rem] font-bold text-white/55">Aucun titre à afficher.</p>
           ) : (
             tracks.map((t, i) => (
-              <Row key={t.videoId} index={i} title={t.title} artist={t.artist} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => onPlay({ videoId: t.videoId, playlistId: list.playlistId, index: i }, launchOf(list))} />
+              <Row key={t.videoId} index={i} title={t.title} artist={t.artist} artists={t.artists} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => onPlay({ videoId: t.videoId, playlistId: list.playlistId, index: i }, launchOf(list))} />
             ))
           )}
         </div>
@@ -1656,25 +1902,145 @@ function PlaylistDetail({ detail, current, onPlay }: { detail: { list: Playlist;
   );
 }
 
-function ArtistDetail({ artist, current, onPlay, onRadio }: { artist: { preview: Artist; page: ArtistPage | null }; current: MusicState["now"]; onPlay: (t: Track) => void; onRadio: (t: Track) => void }) {
+/** Fiche d'artiste ouverte, avec tous ses titres une fois lus, et l'artiste d'où l'on vient. */
+type ArtistView = {
+  id: string;
+  preview: Artist;
+  page: ArtistPage | null;
+  songs: Track[] | null;
+  /** Artiste d'où l'on vient (artiste proche) ; Retour y ramène. */
+  back: ArtistView | null;
+  /** Vue d'où la fiche a été ouverte (nom d'artiste cliqué ailleurs) ; Retour y ramène. */
+  ret: { view: View; album: AlbumView | null } | null;
+};
+type AlbumView = { id: string; preview: Album; page: AlbumPage | null };
+
+/** Titres montrés avant « Voir tous les titres ». */
+const ARTIST_TOP = 10;
+
+/**
+ * Fiche d'artiste : en-tête (photo, auditeurs, radio), ses titres (tous, pas seulement les cinq
+ * populaires), puis chaque carrousel de YouTube Music (albums, singles, vidéos, playlists,
+ * artistes proches) et sa présentation. Un pont plus ancien ne donne que les cinq titres.
+ */
+function ArtistDetail({ artist, current, onPlay, onRadio, onCard }: { artist: ArtistView; current: MusicState["now"]; onPlay: (t: Track, list?: string, index?: number) => void; onRadio: (t: Track) => void; onCard: (c: ArtistCard) => void }) {
   const page = artist.page;
-  const tracks = page?.tracks ?? null;
+  const [all, setAll] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const top = page?.tracks ?? null;
+  // tous les titres dès qu'ils sont là (les cinq populaires en tête, comme YouTube Music)
+  const songs = artist.songs && artist.songs.length > (top?.length ?? 0) ? artist.songs : top;
+  const list = page?.songsId && songs === artist.songs ? page.songsId.replace(/^VL/, "") : undefined;
+  const shown = songs ? (all ? songs : songs.slice(0, ARTIST_TOP)) : null;
+  const playing = (id: string) => current?.source === "youtube" && current.id === id;
   return (
     <>
       {/* le gros bouton lance le titre le plus populaire, puis la radio qui en découle : la musique ne s'arrête pas au bout d'un titre */}
-      <DetailHeader image={page?.thumbnail ?? artist.preview.thumbnail} round title={page?.name || artist.preview.name} subtitle={artist.preview.subtitle} playLabel="Lancer la radio de l’artiste" onPlay={() => tracks?.[0] && onRadio(tracks[0])} />
+      <DetailHeader image={page?.thumbnail ?? artist.preview.thumbnail} round title={page?.name || artist.preview.name} subtitle={page?.subtitle || artist.preview.subtitle} playLabel="Lancer la radio de l’artiste" onPlay={() => top?.[0] && onRadio(top[0])} />
       <Scroll>
         <div className="mt-2 flex flex-col gap-0.5">
-          {tracks === null ? (
+          {shown === null ? (
             <Loading />
-          ) : tracks.length === 0 ? (
+          ) : shown.length === 0 ? (
             <p className="py-6 text-center text-[0.9rem] font-bold text-white/55">Aucun titre à afficher.</p>
           ) : (
-            tracks.map((t, i) => <Row key={t.videoId} index={i} title={t.title} artist={t.album ?? ""} duration={t.duration} thumbnail={t.thumbnail} current={current?.id === t.videoId} playing={!!current?.playing} onClick={() => onPlay(t)} />)
+            <>
+              <ShelfTitle title="Titres" count={songs && songs.length > ARTIST_TOP ? songs.length : undefined} />
+              {shown.map((t, i) => (
+                <Row key={t.videoId} index={i} title={t.title} artist={t.album ?? t.artist} duration={t.duration} thumbnail={t.thumbnail} current={playing(t.videoId)} playing={!!current?.playing} onClick={() => onPlay(t, list, list ? i : undefined)} />
+              ))}
+              {songs && songs.length > ARTIST_TOP && (
+                <motion.button
+                  type="button"
+                  data-focusable
+                  whileTap={{ scale: 0.97 }}
+                  onClick={() => {
+                    sound.play("toggle");
+                    setAll((v) => !v);
+                  }}
+                  className="ibox-focusable mt-1 h-10 w-full rounded-2xl bg-white/8 text-[0.85rem] font-bold text-white/80 transition-colors [--ring-radius:1rem] hover:bg-white/14"
+                >
+                  {all ? "Réduire la liste" : `Voir les ${songs.length} titres`}
+                </motion.button>
+              )}
+            </>
           )}
         </div>
+        {(page?.sections ?? []).map((s, i) => (
+          <ArtistShelf key={`${s.title}-${i}`} index={i} title={s.title} items={s.items} current={current} onCard={onCard} />
+        ))}
+        {page?.about && (
+          <section className="mt-5">
+            <ShelfTitle title="À propos" />
+            <p className={`whitespace-pre-line text-[0.85rem] leading-relaxed font-bold text-white/65 ${aboutOpen ? "" : "line-clamp-4"}`}>{page.about}</p>
+            <motion.button
+              type="button"
+              data-focusable
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                sound.play("toggle");
+                setAboutOpen((v) => !v);
+              }}
+              className="ibox-focusable mt-1 h-9 rounded-full px-3 text-[0.82rem] font-bold text-white/75 transition-colors [--ring-radius:999px] hover:bg-white/10"
+            >
+              {aboutOpen ? "Réduire" : "Lire la suite"}
+            </motion.button>
+          </section>
+        )}
       </Scroll>
     </>
+  );
+}
+
+function ShelfTitle({ title, count }: { title: string; count?: number }) {
+  return (
+    <h3 className="mt-1 mb-1.5 flex items-baseline gap-2 px-1 font-display text-[1rem] font-semibold">
+      {title}
+      {count !== undefined && <span className="text-[0.78rem] font-bold text-white/45 tabular-nums">{count}</span>}
+    </h3>
+  );
+}
+
+/** Un carrousel de la fiche d'artiste : une rangée de cartes qui défile de côté. */
+function ArtistShelf({ title, items, index, current, onCard }: { title: string; items: ArtistCard[]; index: number; current: MusicState["now"]; onCard: (c: ArtistCard) => void }) {
+  return (
+    <section className="mt-5">
+      <ShelfTitle title={title} />
+      {/* la marge intérieure laisse la place à l'anneau de focus */}
+      <div data-nav-group={`artist-shelf-${index}`} className="-mx-2 flex gap-3 overflow-x-auto px-2 py-2 [scrollbar-width:none]">
+        {items.map((c, i) => (
+          <ShelfCard key={`${c.kind}-${c.id}`} card={c} index={i} current={c.kind === "video" && current?.id === c.id} onClick={() => onCard(c)} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ShelfCard({ card, index, current, onClick }: { card: ArtistCard; index: number; current: boolean; onClick: () => void }) {
+  const wide = card.kind === "video";
+  const round = card.kind === "artist";
+  // un album : son année (et son type) plutôt que la ligne complète de YouTube Music
+  const sub = card.kind === "album" ? [card.type, card.year].filter(Boolean).join(" • ") || card.subtitle : card.subtitle;
+  return (
+    <motion.button
+      type="button"
+      data-focusable
+      onClick={() => {
+        sound.play("select");
+        onClick();
+      }}
+      {...rise(index)}
+      whileTap={{ scale: 0.96 }}
+      className={`ibox-focusable flex flex-none flex-col gap-2 rounded-2xl p-1.5 text-left transition-colors [--ring-radius:1rem] hover:bg-white/10 ${wide ? "w-52" : "w-32"} ${current ? "bg-white/12" : ""}`}
+    >
+      <div className={`w-full overflow-hidden ring-1 ring-white/10 ${wide ? "aspect-video rounded-xl" : round ? "aspect-square rounded-full" : "aspect-square rounded-xl"}`}>
+        <Thumb src={card.thumbnail} fill />
+      </div>
+      <div className={`min-w-0 px-0.5 ${round ? "text-center" : ""}`}>
+        <div className="line-clamp-2 text-[0.82rem] leading-snug font-bold">{card.title}</div>
+        {sub && <div className="truncate text-[0.72rem] font-bold text-white/50">{sub}</div>}
+      </div>
+    </motion.button>
   );
 }
 
@@ -1703,7 +2069,7 @@ function AlbumDetail({ album, current, onPlay }: { album: { preview: Album; page
           ) : tracks.length === 0 ? (
             <p className="py-6 text-center text-[0.9rem] font-bold text-white/55">Aucun titre à afficher.</p>
           ) : (
-            tracks.map((t, i) => <Row key={t.videoId} index={i} title={t.title} artist={t.artist} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => playAt(i)} />)
+            tracks.map((t, i) => <Row key={t.videoId} index={i} title={t.title} artist={t.artist} artists={t.artists} duration={t.duration} thumbnail={t.thumbnail} current={current?.source === "youtube" && current.id === t.videoId} playing={!!current?.playing} onClick={() => playAt(i)} />)
           )}
         </div>
       </Scroll>
@@ -1711,7 +2077,120 @@ function AlbumDetail({ album, current, onPlay }: { album: { preview: Album; page
   );
 }
 
-function QueueList({ items, current, onPlay, onRadio }: { items: QueueItem[]; current: MusicState["now"]; onPlay: (q: QueueItem) => void; onRadio?: () => void }) {
+/** Lecture automatique : une flèche qui repart en boucle vers l'avant. */
+function AutoplayGlyph({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 12a8 8 0 0 1 14.3-4.9" />
+      <path d="M19 3v4.5h-4.5" />
+      <path d="M10 9.5v5l4-2.5z" fill="currentColor" />
+      <path d="M20 12a8 8 0 0 1-14.3 4.9" opacity="0.4" />
+    </svg>
+  );
+}
+
+// ——— Fondus entre les titres ———
+
+/** Deux courbes qui se croisent : un titre arrive (trait plein), l'autre s'efface (trait léger). */
+function FadeGlyph({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 6c7 0 11 12 18 12" opacity="0.4" />
+      <path d="M3 18c7 0 11-12 18-12" />
+    </svg>
+  );
+}
+
+/** Durée d'un fondu en clair. `own` : réglage d'une transition (null : elle suit le réglage général). */
+function fadeText(value: number | null, own?: boolean): string {
+  return value === null ? "Par défaut" : value === 0 ? (own ? "Aucun" : "Désactivé") : `${value} s`;
+}
+
+/**
+ * Réglage d'une durée de fondu : gauche / droite au clavier et à la manette, − et + à la souris.
+ * Général : de « Désactivé » à 12 s. Transition (`own`) : « Par défaut », « Aucun », puis 1 à 12 s.
+ */
+function FadeStepper({ value, own, label, autoFocus, onChange }: { value: number | null; own?: boolean; label: string; autoFocus?: boolean; onChange: (v: number | null) => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (autoFocus) box.current?.focus();
+  }, [autoFocus]);
+  const step = (dir: 1 | -1) => {
+    const next = stepFade(value, dir, own);
+    if (next === value) return;
+    sound.play("toggle");
+    onChange(next);
+  };
+  const side = (dir: 1 | -1, text: string, off: boolean) => (
+    <button
+      type="button"
+      tabIndex={-1}
+      aria-label={text}
+      title={text}
+      disabled={off}
+      onClick={() => step(dir)}
+      className="grid size-8 flex-none place-items-center rounded-full text-white/70 transition-[background-color,color,transform] duration-150 hover:bg-white/14 hover:text-white active:scale-90 disabled:pointer-events-none disabled:text-white/20"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" aria-hidden="true">
+        <path d={dir < 0 ? "M5 12h14" : "M5 12h14M12 5v14"} />
+      </svg>
+    </button>
+  );
+  return (
+    <div
+      ref={box}
+      role="spinbutton"
+      tabIndex={0}
+      data-focusable
+      data-nav-capture="x"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={FADE_MAX_S}
+      aria-valuenow={value ?? undefined}
+      onKeyDown={(e) => {
+        const dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (!dir) return;
+        e.preventDefault();
+        e.stopPropagation();
+        step(dir);
+      }}
+      className="ibox-focusable flex flex-none items-center rounded-full bg-white/10 p-1 [--ring-radius:999px]"
+    >
+      {side(-1, "Raccourcir le fondu", value === (own ? null : 0))}
+      <span className={`w-[5.6rem] text-center text-[0.84rem] font-bold tabular-nums ${value ? "text-white" : "text-white/60"}`}>{fadeText(value, own)}</span>
+      {side(1, "Allonger le fondu", value === FADE_MAX_S)}
+    </div>
+  );
+}
+
+function QueueList({ items, current, fade, fadeOld, crossNote, autoplay, onAutoplay, onFade, onPlay, onRadio }: { items: QueueItem[]; current: MusicState["now"]; fade: FadeSettings; fadeOld: boolean; crossNote: string | null; autoplay: boolean | null; onAutoplay: (on: boolean) => void; onFade: (next: FadeSettings) => void; onPlay: (q: QueueItem) => void; onRadio?: () => void }) {
+  /** Titre dont on règle la transition (celle qui mène à lui). */
+  const [editing, setEditing] = useState<string | null>(null);
+  const shown = editing !== null && items.some((q) => q.videoId === editing) ? editing : null;
+  // Retour : referme le réglage ouvert et rend le focus à sa pastille
+  useEffect(() => {
+    if (!shown) return;
+    return input.onBack(() => {
+      setEditing(null);
+      document.querySelector<HTMLElement>(`[data-fade-chip="${CSS.escape(shown)}"]`)?.focus();
+      return true;
+    });
+  }, [shown]);
+  // fondu général : le titre qui finit s'efface, le suivant arrive
+  const general = (
+    <div className="flex items-center gap-3 rounded-2xl bg-white/6 p-2">
+      <span className="grid size-11 flex-none place-items-center rounded-xl bg-white/8 text-white/75">
+        <FadeGlyph size={20} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[0.9rem] font-bold">Fondu entre les titres</span>
+        <span className={`block text-[0.78rem] font-bold text-white/55 ${fadeOld || crossNote ? "" : "truncate"}`}>
+          {fadeOld ? "Mettez à jour le plugin Music in the Box (Paramètres › Plugins) pour régler les fondus." : (crossNote ?? "Le suivant démarre pendant que le titre finit")}
+        </span>
+      </span>
+      {!fadeOld && <FadeStepper value={fade.seconds} label="Fondu entre les titres" onChange={(v) => onFade({ ...fade, seconds: v ?? 0 })} />}
+    </div>
+  );
   // radio du titre en cours : YouTube Music compose une suite sans fin de titres proches
   const radio = onRadio && (
     <motion.button
@@ -1738,11 +2217,81 @@ function QueueList({ items, current, onPlay, onRadio }: { items: QueueItem[]; cu
   return (
     <Scroll>
       <div className="flex flex-col gap-0.5">
+        {general}
+        {autoplay !== null && (
+          <div className="flex items-center gap-3 rounded-2xl bg-white/6 p-2 pr-3">
+            <span className="grid size-11 flex-none place-items-center rounded-xl bg-white/8 text-white/75">
+              <AutoplayGlyph />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[0.9rem] font-bold">Lecture automatique</span>
+              <span className="block truncate text-[0.78rem] font-bold text-white/55">Des titres proches quand la file est finie</span>
+            </span>
+            <Switch checked={autoplay} onChange={onAutoplay} label="Lecture automatique" />
+          </div>
+        )}
         {radio}
         {items.length === 0 ? (
           <p className="py-8 text-center text-[0.9rem] font-bold text-white/55">Rien à suivre pour l’instant.</p>
         ) : (
-          items.map((q, i) => <Row key={q.videoId} index={i} first={i === 0 && !radio} title={q.title} artist={q.artist} duration={q.duration} thumbnail={q.thumbnail} current={current?.id === q.videoId} onClick={() => onPlay(q)} />)
+          items.map((q, i) => {
+            // la transition qui mène à ce titre part de celui qui le précède dans la file
+            const from = i === 0 ? current?.id : items[i - 1].videoId;
+            const own = from ? transitionFade(fade, from, q.videoId) : null;
+            const open = shown === q.videoId;
+            // la suite automatique commence ici : une ligne la sépare de la file
+            const autoStart = q.auto && (i === 0 || !items[i - 1].auto);
+            return (
+              <div key={q.videoId}>
+                {autoStart && (
+                  <div className="mt-3 mb-1 flex items-center gap-2 px-2 text-[0.75rem] font-extrabold tracking-wide text-white/45 uppercase">
+                    <AutoplayGlyph size={14} />
+                    Lecture automatique
+                  </div>
+                )}
+                <div className="flex items-center gap-1">
+                  <Row index={i} first={i === 0 && !radio} title={q.title} artist={q.artist} artists={q.artists} duration={q.duration} thumbnail={q.thumbnail} current={current?.id === q.videoId} onClick={() => onPlay(q)} />
+                  {from && !fadeOld && (
+                    <motion.button
+                      type="button"
+                      data-focusable
+                      data-fade-chip={q.videoId}
+                      aria-label="Fondu avant ce titre"
+                      aria-expanded={open}
+                      title="Fondu avant ce titre"
+                      whileTap={{ scale: 0.9 }}
+                      onClick={() => {
+                        sound.play("select");
+                        setEditing(open ? null : q.videoId);
+                      }}
+                      className={`ibox-focusable flex h-9 flex-none items-center gap-1.5 rounded-full px-2.5 text-[0.75rem] font-bold tabular-nums transition-colors [--ring-radius:999px] ${own !== null ? "bg-[color-mix(in_srgb,var(--accent)_30%,transparent)] text-[var(--accent)]" : open ? "bg-white/14 text-white" : "text-white/35 hover:bg-white/10 hover:text-white"}`}
+                    >
+                      <FadeGlyph size={16} />
+                      {own !== null && <span>{fadeText(own, true)}</span>}
+                    </motion.button>
+                  )}
+                </div>
+                <AnimatePresence initial={false}>
+                  {open && from && (
+                    <motion.div
+                      key="fade"
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      transition={reduced() ? { duration: 0 } : TWEEN.fast}
+                      // la marge intérieure laisse la place à l'anneau de focus
+                      className="-mx-2 overflow-hidden px-2"
+                    >
+                      <div className="my-2 ml-14 flex items-center gap-3 rounded-2xl bg-white/6 py-1.5 pr-1.5 pl-3.5">
+                        <span className="min-w-0 flex-1 truncate text-[0.82rem] font-bold text-white/75">Fondu avant ce titre</span>
+                        <FadeStepper own autoFocus value={own} label="Fondu avant ce titre" onChange={(v) => onFade(setTransitionFade(fade, from, q.videoId, v))} />
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            );
+          })
         )}
       </div>
     </Scroll>
@@ -1994,8 +2543,9 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, 
   const list = search[search.kind];
   return (
     <>
-      <div className="flex items-center gap-2">
-        <label className="flex h-12 min-w-0 flex-1 items-center gap-3 rounded-2xl bg-white/10 px-4 transition-colors focus-within:bg-white/16">
+      {/* le champ a toute la largeur (on voit ce qu'on écrit), les filtres passent dessous */}
+      <div className="flex flex-col gap-2">
+        <label className="flex h-12 w-full min-w-0 items-center gap-3 rounded-2xl bg-white/10 px-4 transition-colors focus-within:bg-white/16">
           <Icon name="search" size="1.1rem" className="flex-none text-white/60" />
           <span className="sr-only">Rechercher un titre, une vidéo, un artiste ou un album</span>
           <input
@@ -2015,7 +2565,7 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, 
           />
           {search.loading && <span className="size-4 flex-none animate-spin rounded-full border-2 border-white/25 border-t-white" aria-label="Recherche…" />}
         </label>
-        <IconTabs<SearchKind> small value={search.kind} onChange={onKind} items={SEARCH_TABS} />
+        <IconTabs<SearchKind> wide value={search.kind} onChange={onKind} items={SEARCH_TABS} />
       </div>
       <Scroll>
         {list === null ? (
@@ -2046,6 +2596,7 @@ function Search({ search, current, onQuery, onKind, onSubmit, onPlay, onArtist, 
                       index={i}
                       title={t.title}
                       artist={t.artist}
+                      artists={t.artists}
                       duration={t.duration}
                       thumbnail={t.thumbnail}
                       current={current?.id === t.videoId}
