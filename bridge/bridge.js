@@ -7,7 +7,7 @@
 
   var P = ytmParse;
   var results = {};
-  var VERSION = 7;
+  var VERSION = 8;
   /** Pages lues au plus pour une playlist (environ 100 titres par page). */
   var MAX_PAGES = 10;
 
@@ -256,7 +256,9 @@
     lat: 0.5,       // temps (s) entre « suivant » et le son du nouveau titre, appris à chaque fondu
     failed: null,   // raison du repli : 'compte', 'pub', 'indisponible'
     ads: 0,
-    userPause: 0    // dernière pause demandée par l'utilisateur
+    userPause: 0,   // dernière pause demandée par l'utilisateur
+    route: null,    // son de l'écho par Web Audio : {ctx, gain, el, win}
+    routeSince: 0   // depuis quand le branchement attend
   };
   (function () {
     var s = null;
@@ -285,7 +287,54 @@
   // tant que l'écho n'a pas la parole, sa balise reste muette, quoi que fasse son lecteur
   function echoGuard(e) {
     var v = e && e.target;
-    if (v && !echo.speaking && v.muted === false) v.muted = true;
+    if (v && !echo.speaking && v.muted === false && !(echo.route && echo.route.el === v)) v.muted = true;
+  }
+  // Son de l'écho : par un gain Web Audio, jamais par sa balise. Mesuré sur le vrai lecteur
+  // (25/11/2026) : YouTube remet lui-même la balise de l'écho à « muted = false, volume = 1 » au
+  // chargement et en pleine lecture ; la garde la recoupait après coup, et l'écho passait en
+  // rafales de 4 à 30 ms, à 100 %, sans tenir compte du volume choisi (« sons en double, très
+  // forts »). Branchée sur un gain qui reste à zéro tant que l'écho n'a pas la parole, la balise
+  // peut faire ce qu'elle veut. Sans ce branchement, pas de fondu enchaîné (fondu simple).
+  // rend true (branché), false (pas encore : contexte audio qui démarre) ou null (impossible)
+  function echoRoute() {
+    var v = echoVideo(), w = echo.frame && echo.frame.contentWindow, r = echo.route;
+    if (!v || !w) return false;
+    try {
+      if (!r || r.win !== w || r.ctx.state === 'closed') {
+        var AC = w.AudioContext || w.webkitAudioContext;
+        if (!AC) return null;
+        var ctx = new AC({ latencyHint: 'interactive' }), gain = ctx.createGain();
+        gain.gain.value = 0;
+        gain.connect(ctx.destination);
+        r = echo.route = { ctx: ctx, gain: gain, el: null, win: w };
+      }
+      if (r.ctx.state !== 'running') { r.ctx.resume(); return false; }
+      if (r.el !== v) {
+        // une balise ne se branche qu'une fois ; rien ne joue avant (le chargement suit le branchement)
+        r.ctx.createMediaElementSource(v).connect(r.gain);
+        r.el = v;
+      }
+      return true;
+    } catch (e) { return null; }
+  }
+  function echoRouted() {
+    var r = echo.route;
+    return !!(r && r.el && r.el === echoVideo() && r.ctx.state === 'running');
+  }
+  // gain de l'écho : lissé (quelques millisecondes) pour qu'aucun réglage ne claque
+  function echoGain(value, now) {
+    var r = echo.route;
+    if (!r || !r.gain) return;
+    try {
+      if (now) { r.gain.gain.cancelScheduledValues(r.ctx.currentTime); r.gain.gain.setValueAtTime(value, r.ctx.currentTime); }
+      else r.gain.gain.setTargetAtTime(value, r.ctx.currentTime, 0.012);
+    } catch (e) { r.gain.gain.value = value; }
+  }
+  // retard du chemin Web Audio sur celui de la balise : l'écho se cale d'autant en avance
+  function echoLead() {
+    var r = echo.route, c = r && r.ctx;
+    var lat = c ? (Number(c.baseLatency) || 0) : 0;
+    return Math.max(0, Math.min(0.06, lat));
   }
   function echoArm() {
     var d = echoDoc();
@@ -308,11 +357,15 @@
   function echoStop(remove) {
     var p = echoPlayer(), v = echoVideo();
     echo.speaking = false; echo.gain = 0; echo.job = null;
-    if (v) { v.muted = true; try { v.playbackRate = 1; } catch (e) { /* balise partie */ } }
+    echoGain(0, true);
+    // branchée, la balise n'est jamais coupée par le pont : le gain fait le silence (couper la
+    // balise d'un autre que son lecteur fait réagir YouTube)
+    if (v) { if (!echoRouted()) v.muted = true; try { v.playbackRate = 1; } catch (e) { /* balise partie */ } }
     try { if (p) { p.pauseVideo(); if (p.stopVideo) p.stopVideo(); } } catch (e) { /* cadre parti */ }
     if (remove && echo.frame) {
       try { echo.frame.remove(); } catch (e) { /* déjà retiré */ }
       echo.frame = null; echo.doc = null;
+      if (echo.route) { try { echo.route.ctx.close(); } catch (e) { /* déjà fermé */ } echo.route = null; }
     }
   }
   function echoFail(reason, keep) {
@@ -327,6 +380,15 @@
     if (!v) return;
     var user = fade.user != null ? fade.user : p && p.getVolume ? p.getVolume() : 0;
     var vol = Math.max(0, Math.min(1, echo.norm * user / 100 * g));
+    if (echoRouted()) {
+      // la balise à plein volume (YouTube l'y remet de toute façon), le gain fait le volume
+      if (echo.speaking) {
+        if (v.muted) v.muted = false;
+        if (v.volume < 0.999) v.volume = 1;
+        echoGain(vol);
+      } else echoGain(0, true);
+      return;
+    }
     if (Math.abs(v.volume - vol) > 0.0005) v.volume = vol;
     if (v.muted !== !echo.speaking) v.muted = !echo.speaking;
   }
@@ -345,7 +407,8 @@
   function echoHalt() {
     var ev = echoVideo(), ep = echoPlayer();
     echo.speaking = false; echo.gain = 0;
-    if (ev) { ev.muted = true; try { ev.playbackRate = 1; } catch (e) { /* balise partie */ } }
+    echoGain(0, true);
+    if (ev) { if (!echoRouted()) ev.muted = true; try { ev.playbackRate = 1; } catch (e) { /* balise partie */ } }
     try { if (ep) { ep.pauseVideo(); if (ep.stopVideo) ep.stopVideo(); } } catch (e) { /* cadre parti */ }
   }
   // l'écho s'est arrêté avant la fin du fondu (fin de fichier, erreur, cadre parti) : il se tait
@@ -395,7 +458,17 @@
       var vm = document.querySelector('video'), uv = p.getVolume ? p.getVolume() : 0;
       echo.norm = vm && typeof vm.volume === 'number' && uv > 0 && fade.user == null ? Math.max(0.05, Math.min(1.5, vm.volume / (uv / 100))) : 1;
       echo.speaking = false;
-      if (ev) ev.muted = true;
+      var routed = echoRoute();
+      if (routed === null) { echoFail('indisponible', false); return null; }
+      if (!routed) {
+        // le gain Web Audio n'est pas encore prêt (contexte audio qui démarre) : on réessaie ; au
+        // bout de 20 s, pas de fondu enchaîné pour cette session
+        if (!echo.routeSince) echo.routeSince = now;
+        else if (now - echo.routeSince > 20000) echoFail('indisponible', false);
+        return null;
+      }
+      echo.routeSince = 0;
+      echoGain(0, true);
       ep.loadVideoById({ videoId: id, startSeconds: pos / 1000 + 1 });
       echo.job = { id: id, phase: 'load', at: now, D: D, started: 0, locked: 0, sought: 0, lead: 0.05, act: repeatMode() === 'one' ? 'again' : 'next' };
       fade.fast = true;
@@ -426,23 +499,27 @@
         if (j.started) { echoFail('compte', true); p.playVideo(); return null; }
       }
       if (es === 2 && j.started) { echoFail('compte', true); return null; }
+      if (!echoRouted() && !echoRoute()) { echo.skip = { id: id, since: fade.since }; echoStop(false); return null; }
+      echoGain(0, true);
       if (es === 1) {
         if (!j.started) j.started = now;
         j.phase = 'sync';
-        var d = ep.getCurrentTime() - p.getCurrentTime(), a = Math.abs(d);
+        var d = ep.getCurrentTime() - p.getCurrentTime() - echoLead(), a = Math.abs(d);
         if (j.sought && now - j.sought < 600) {
           // juste après un saut : on laisse l'écho repartir avant de mesurer
-        } else if (a > 0.15) {
+        } else if (a > 0.15 || (a > 0.04 && (j.seeks || 0) < 4)) {
           // trop loin : un saut, en visant un peu devant (le temps que l'écho reparte, appris à
-          // chaque saut), puis la vitesse fait le reste
+          // chaque saut : quatre sauts au plus pour les petits écarts), puis la vitesse fait le reste
           if (j.sought) j.lead = Math.max(0, Math.min(0.5, j.lead - d));
-          ep.seekTo(p.getCurrentTime() + j.lead, true);
+          ep.seekTo(p.getCurrentTime() + echoLead() + j.lead, true);
           j.sought = now;
+          j.seeks = (j.seeks || 0) + 1;
           ev.playbackRate = 1;
           j.locked = 0;
         } else {
-          ev.playbackRate = a < 0.012 ? 1 : d > 0 ? (a > 0.1 ? 0.9 : 0.97) : (a > 0.1 ? 1.1 : 1.03);
-          if (a < 0.03) { if (!j.locked) j.locked = now; } else j.locked = 0;
+          // à moins de 15 ms près : un écart plus grand s'entend au moment où l'écho prend la parole
+          ev.playbackRate = a < 0.004 ? 1 : d > 0 ? (a > 0.1 ? 0.9 : a > 0.02 ? 0.97 : 0.99) : (a > 0.1 ? 1.1 : a > 0.02 ? 1.03 : 1.01);
+          if (a < 0.015) { if (!j.locked) j.locked = now; } else j.locked = 0;
         }
       } else if (!j.started && now - j.at > 9000) {
         // l'écho ne démarre pas à temps : fondu simple pour ce titre
@@ -509,6 +586,7 @@
       // temps qu'a mis le nouveau titre à se faire entendre : le prochain fondu partira d'autant plus tôt
       if (!ad) echo.lat = Math.max(0.1, Math.min(2.5, echo.lat / 2 + ((now - j.hand) / 1000 - pos / 1000) / 2));
     }
+    if (echo.speaking && echo.route && !echoRouted() && !echoRoute()) crossRecover(j, now);
     if (echo.speaking) {
       var x = j.S ? (et - j.et0) / j.S : 0;
       if (es === 2 && st !== 2 && now - echo.userPause > 2000) {

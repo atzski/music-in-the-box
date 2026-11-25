@@ -1,7 +1,7 @@
 {
   "id": "music-in-the-box",
   "name": "Music in the Box",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "author": { "name": "atzski", "username": "atzski" },
   "description": "Contrôlez YouTube Music ou votre lecteur par-dessus vos parties.",
   "ibox": ">=1.0.5",
