@@ -50,7 +50,7 @@ Sign in once with your Google account and the panel gives you your library: your
 - **Quick start.** When nothing is playing, the panel offers your liked songs and the last playlists and albums you started: one press and the music is on.
 - **Seek without a mouse.** The progress bar can be reached with the arrows or the D-pad, in five-second steps. On the keyboard, X or Space plays and pauses, F likes the song.
 
-Not using YouTube Music? The panel also drives whatever plays through Windows' media controls (Spotify, Deezer, a browser tab…): title, cover, play/pause, previous and next.
+Only YouTube Music is followed: a video playing elsewhere (Twitter, YouTube, a browser tab) never takes your music's place.
 
 ## Private by design
 
@@ -75,7 +75,7 @@ Don't use iBox? Music in the Box also exists as a small Windows app of its own: 
 2. The app waits in the notification area. **Alt+C**, or **View + Y** held on a controller, opens the panel over your game; the same again closes it.
 3. Click the tray icon for the settings: shortcut, where the panel sits on screen, staying visible while you play, YouTube Music sign-in, start with Windows.
 
-Without a YouTube Music account, the panel drives whatever player Windows knows about (Spotify, a browser, Deezer…). If iBox runs with the plugin at the same time, both want Alt+C: pick another shortcut in one of them.
+If iBox runs with the plugin at the same time, both want Alt+C: pick another shortcut in one of them.
 
 |  | iBox plugin | Standalone app |
 |---|---|---|

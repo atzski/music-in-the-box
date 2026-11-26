@@ -50,7 +50,7 @@ Connectez votre compte Google une fois, et le panneau vous donne votre biblioth�
 - **Démarrage rapide.** Quand rien ne joue, le panneau propose vos titres aimés et les dernières playlists et albums lancés : une pression et la musique est là.
 - **Avancer sans souris.** La barre de progression s'atteint aux flèches ou à la croix, par pas de cinq secondes. Au clavier, X ou Espace met en pause, F aime le titre.
 
-Pas sur YouTube Music ? Le panneau pilote aussi ce qui passe par les contrôles média de Windows (Spotify, Deezer, un onglet de navigateur…) : titre, pochette, lecture/pause, précédent et suivant.
+Seul YouTube Music est suivi : une vidéo ouverte ailleurs (Twitter, YouTube, un onglet de navigateur) ne prend pas la place de votre musique.
 
 ## Respect de la vie privée
 
@@ -75,7 +75,7 @@ Vous n'utilisez pas iBox ? Music in the Box existe aussi en petite app Windows �
 2. L'app attend dans la zone de notification. **Alt+C**, ou **Vue + Y** maintenus sur une manette, ouvre le panneau par-dessus le jeu ; la même chose le referme.
 3. Un clic sur l'icône ouvre les réglages : raccourci, place du panneau à l'écran, rester affiché pendant le jeu, connexion à YouTube Music, démarrage avec Windows.
 
-Sans compte YouTube Music, le panneau pilote le lecteur connu de Windows (Spotify, un navigateur, Deezer…). Si iBox tourne en même temps avec le plugin, les deux veulent Alt+C : choisissez un autre raccourci dans l'un des deux.
+Si iBox tourne en même temps avec le plugin, les deux veulent Alt+C : choisissez un autre raccourci dans l'un des deux.
 
 |  | Plugin iBox | App autonome |
 |---|---|---|

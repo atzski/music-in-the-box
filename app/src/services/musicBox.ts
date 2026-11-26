@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 /** État commun des deux sources (voir `src-tauri/src/music/mod.rs`). */
 export interface NowPlaying {
-  source: "youtube" | "system";
+  source: "youtube";
   app: string | null;
   id: string;
   title: string;

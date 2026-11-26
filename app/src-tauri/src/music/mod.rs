@@ -1,8 +1,9 @@
 //! Music in the Box (plan : `docs/MUSIC.md`) : contrôler sa musique par-dessus une partie.
 //!
-//! Deux sources partagent l'état commun [`NowPlaying`] :
-//! - `ytm` : YouTube Music dans une WebView2 cachée (lecture, recherche, playlists) ;
-//! - `smtc` : les contrôles média de Windows (tout autre lecteur : lecture et titres seulement).
+//! Une seule source, `ytm` : YouTube Music dans une WebView2 cachée (lecture, recherche,
+//! playlists), traduite en état commun [`NowPlaying`]. Les autres lecteurs de Windows (vidéo d'un
+//! navigateur, Twitter, Spotify…) ne sont plus repris : une vidéo ouverte ailleurs prenait la place
+//! de la musique (26/11/2026, à la demande de l'utilisateur).
 //!
 //! `overlay` gère la fenêtre `music` (panneau par-dessus le jeu), le combo manette Vue + Y
 //! et le retour du focus au jeu ; le raccourci clavier est dans `shortcut.rs`. Code repris
@@ -11,7 +12,6 @@
 pub mod backdrop;
 pub mod diag;
 pub mod overlay;
-pub mod smtc;
 pub mod ytm;
 
 use std::sync::Mutex;
@@ -25,7 +25,6 @@ use tauri::{AppHandle, Emitter};
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Youtube,
-    System,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -44,7 +43,7 @@ pub struct NowPlaying {
     pub position_ms: u64,
     pub duration_ms: u64,
     pub playing: bool,
-    /// 0–100 ; absent quand la source n'a pas de volume (SMTC).
+    /// 0–100 ; absent tant que le lecteur ne l'a pas donné.
     pub volume: Option<u8>,
     pub can_seek: bool,
     /// Titre aimé (YouTube Music seulement).
@@ -72,14 +71,10 @@ pub(crate) fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// Choix de la source : YouTube Music s'il lit (ou a un titre en pause), sinon le lecteur
-/// Windows en cours, sinon YouTube Music au repos. Bloquant.
+/// État de YouTube Music (titre chargé, en lecture ou non). Bloquant.
 pub fn current(app: &AppHandle) -> MusicState {
     let yt = ytm::window(app).and_then(|_| ytm::call(app, "state", Value::Null).ok());
-    let now = match &yt {
-        Some(v) if ytm::active(v) => ytm::now_playing(v),
-        _ => smtc::now_playing().or_else(|| yt.as_ref().and_then(ytm::now_playing)),
-    };
+    let now = yt.as_ref().and_then(ytm::now_playing);
     if let Ok(mut last) = LAST.lock() {
         *last = now.as_ref().map(|n| n.source);
     }
@@ -102,7 +97,6 @@ fn control(app: &AppHandle, action: &str, value: Option<f64>) -> Result<(), Stri
             };
             ytm::call(app, action, arg).map(|_| ())
         }
-        Some(Source::System) => smtc::control(action, value),
         None => Err("Aucune musique en cours.".into()),
     }
 }

@@ -23,7 +23,7 @@
     "copyright": "© 2026 atzski",
     "category": "Music",
     "shortDescription": "YouTube Music ou votre lecteur, par-dessus vos jeux",
-    "longDescription": "Music in the Box ouvre un mini-lecteur par-dessus vos jeux (Alt+C ou Vue + Y sur la manette) : YouTube Music, ou tout lecteur déclaré à Windows (Spotify, navigateur…).",
+    "longDescription": "Music in the Box ouvre un mini-lecteur par-dessus vos jeux (Alt+C ou Vue + Y sur la manette) : YouTube Music, sans quitter la partie.",
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
