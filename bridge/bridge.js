@@ -228,6 +228,64 @@
     h.until = Date.now() + 4000;
     try { run(); } catch (e) { fade.hold = null; }
   }
+  // ——— Journal ———
+  // Ce que font les fondus et tout saut du lecteur qu'aucune commande n'explique, une ligne par
+  // événement. iBox le relève avec l'état (`state().log`) et l'écrit dans logs/music.log : une
+  // fin de titre qui saute dans iBox (fenêtre cachée), jamais reproduite ailleurs, s'y explique.
+  var journal = [], watchMain = { id: null, pos: 0, dur: 0, st: null, at: 0, el: null, asked: 0 };
+  function note(what) {
+    var p = player(), d = p && p.getVideoData ? p.getVideoData() : {}, j = echo.job;
+    var where = p && p.getPlayerState
+      ? (d.video_id || '-') + ' ' + (p.getCurrentTime() || 0).toFixed(1) + '/' + (p.getDuration() || 0).toFixed(1) + ' état ' + p.getPlayerState()
+      : 'pas de lecteur';
+    journal.push(what + ' | ' + where + (j ? ' | écho ' + j.phase : '') + (adPlaying(p) ? ' | pub' : ''));
+    if (journal.length > 80) journal.shift();
+  }
+  // une commande de l'utilisateur explique le saut qui suit (déplacement, titre suivant…)
+  function asked(what) { watchMain.asked = Date.now(); note('commande : ' + what); }
+  function mainEvent(e) {
+    var v = e && e.target;
+    if (!v || Date.now() - watchMain.asked < 1500) return;
+    note('balise : ' + e.type + ' à ' + (Number(v.currentTime) || 0).toFixed(1) + '/' + (Number(v.duration) || 0).toFixed(1) + (v.error ? ' erreur ' + v.error.code : ''));
+  }
+  // relevé à chaque tour de la veille : changement de titre, de durée, saut de position, fin
+  function watchMainTick(p) {
+    var w = watchMain, now = Date.now(), v = document.querySelector('video');
+    if (v && v !== w.el && v.addEventListener) {
+      w.el = v;
+      ['seeking', 'ended', 'error', 'emptied', 'stalled'].forEach(function (t) { v.addEventListener(t, mainEvent); });
+    }
+    var d = p.getVideoData ? p.getVideoData() : {}, id = d.video_id || null;
+    var pos = p.getCurrentTime() || 0, dur = p.getDuration() || 0, st = p.getPlayerState();
+    var quiet = now - w.asked > 1500;
+    if (id !== w.id) {
+      if (w.id) note('titre suivant (avant : ' + w.id + ' à ' + w.pos.toFixed(1) + '/' + w.dur.toFixed(1) + ')' + (quiet ? '' : ', demandé'));
+    } else if (quiet && w.at) {
+      var expect = w.pos + (w.st === 1 ? (now - w.at) / 1000 : 0);
+      if (Math.abs(pos - expect) > 3) note('saut de position : ' + w.pos.toFixed(1) + ' → ' + pos.toFixed(1));
+      if (w.dur > 0 && dur > 0 && Math.abs(dur - w.dur) > 2) note('durée changée : ' + w.dur.toFixed(1) + ' → ' + dur.toFixed(1));
+      if (st !== w.st && (st === 0 || w.st === 0 || st === 2 || w.st === 2)) note('état ' + w.st + ' → ' + st);
+    }
+    w.id = id; w.pos = pos; w.dur = dur; w.st = st; w.at = now;
+  }
+
+  // ordres venus du système (touches multimédia, contrôles de Windows) : notés au passage
+  (function () {
+    var ms = navigator.mediaSession;
+    if (!ms || typeof ms.setActionHandler !== 'function' || ms.__iboxNote) return;
+    var set = ms.setActionHandler.bind(ms);
+    try {
+      ms.__iboxNote = true;
+      ms.setActionHandler = function (action, handler) {
+        if (typeof handler !== 'function') return set(action, handler);
+        return set(action, function (details) {
+          note('ordre du système : ' + action + (details && details.seekTime != null ? ' à ' + Number(details.seekTime).toFixed(1) : ''));
+          return handler.apply(this, arguments);
+        });
+      };
+    } catch (e) { /* session en lecture seule : rien de noté */ }
+  })();
+
   // ——— Fondu enchaîné : un second lecteur, « l'écho » ———
   // Un vrai recouvrement demande deux sons à la fois. Le lecteur de la page reste le seul maître
   // (file, historique, paroles, « En cours ») ; un second lecteur YouTube Music, chargé dans un
@@ -435,6 +493,7 @@
     }
   }
   function echoFail(reason, keep) {
+    note('écho : repli sur le fondu simple (' + reason + ')');
     echo.failed = reason;
     if (keep) store(ECHO_KEY, JSON.stringify({ reason: reason, at: Date.now() }));
     echoStop(true);
@@ -480,6 +539,7 @@
   function crossAbort() {
     var j = echo.job;
     if (!j) return;
+    note('écho : fondu interrompu par une commande');
     if (j.phase === 'swap') {
       // passage interrompu : le principal reprend aussitôt, l'écho se tait
       mainGainTo(1, 0.03);
@@ -501,7 +561,8 @@
   }
   // l'écho s'est arrêté avant la fin du fondu (fin de fichier, erreur, cadre parti) : il se tait
   // et le titre en cours rejoint son plein volume en ``CROSS_RECOVER`` ms
-  function crossRecover(j, now) {
+  function crossRecover(j, now, why) {
+    if (echo.speaking) note('écho : arrêté avant la fin du fondu (' + (why || '?') + ')');
     echoHalt();
     if (!j.recover) j.recover = { at: now, from: fade.g };
   }
@@ -541,7 +602,7 @@
       if (!D || r > D + ECHO_PREP) return null;
       // trop tard pour charger et caler l'écho (déplacement tout près de la fin) : fondu simple ;
       // sinon le fondu sera raccourci à ce qui restera du titre
-      if (r < 4000) { echo.skip = { id: id, since: fade.since }; return null; }
+      if (r < 4000) { echo.skip = { id: id, since: fade.since }; note('écho : trop près de la fin, fondu simple'); return null; }
       // préparation : l'écho charge le titre en cours, muet, un peu en avance, puis se cale
       var vm = document.querySelector('video'), uv = p.getVolume ? p.getVolume() : 0;
       echo.norm = vm && typeof vm.volume === 'number' && uv > 0 && fade.user == null ? Math.max(0.05, Math.min(1.5, vm.volume / (uv / 100))) : 1;
@@ -559,6 +620,7 @@
       echoGain(0, true);
       mainRouteTry();
       ep.loadVideoById({ videoId: id, startSeconds: pos / 1000 + 1 });
+      note('écho : préparation (fondu de ' + (D / 1000).toFixed(1) + ' s, reste ' + (r / 1000).toFixed(1) + ' s, principal ' + (mainRouted() ? 'branché' : 'direct') + ')');
       echo.job = { id: id, phase: 'load', at: now, D: D, started: 0, locked: 0, sought: 0, lead: 0.05, act: repeatMode() === 'one' ? 'again' : 'next' };
       fade.fast = true;
       return null;
@@ -567,16 +629,21 @@
     if (!ep || !ev) {
       if (j.phase === 'load' || j.phase === 'sync') { echoStop(false); return null; }
       // cadre parti en plein fondu : le titre en cours remonte en courbe
-      crossRecover(j, now);
+      crossRecover(j, now, 'cadre parti');
     }
     var es = ep ? ep.getPlayerState() : -1;
 
     if (j.phase === 'load' || j.phase === 'sync') {
       // le titre a changé, est fini ou a été déplacé au début : cette préparation tombe
-      if (id !== j.id || st === 0 || adPlaying(p) || pos < 1000) { echoStop(false); return null; }
+      if (id !== j.id || st === 0 || adPlaying(p) || pos < 1000) {
+        note('écho : préparation abandonnée (' + (id !== j.id ? 'titre changé' : st === 0 ? 'titre fini' : adPlaying(p) ? 'publicité' : 'retour au début') + ')');
+        echoStop(false);
+        return null;
+      }
       if (adPlaying(ep)) {
         // publicité dans l'écho : jamais regardée, même muette ; au bout de deux, repli durable
         echo.ads++;
+        note('écho : publicité dans le second lecteur');
         echo.skip = { id: id, since: fade.since };
         if (echo.ads >= 2) echoFail('pub', true); else echoStop(false);
         return null;
@@ -588,10 +655,10 @@
         if (j.started) { echoFail('compte', true); p.playVideo(); return null; }
       }
       if (es === 2 && j.started) { echoFail('compte', true); return null; }
-      if (!echoRouted() && !echoRoute()) { echo.skip = { id: id, since: fade.since }; echoStop(false); return null; }
+      if (!echoRouted() && !echoRoute()) { echo.skip = { id: id, since: fade.since }; note('écho : son non branché, fondu simple'); echoStop(false); return null; }
       echoGain(0, true);
       if (es === 1) {
-        if (!j.started) j.started = now;
+        if (!j.started) { j.started = now; note('écho : démarre, calage'); }
         j.phase = 'sync';
         var d = ep.getCurrentTime() - p.getCurrentTime() - echoLead(), a = Math.abs(d);
         if (j.sought && now - j.sought < 600) {
@@ -612,6 +679,7 @@
         }
       } else if (!j.started && now - j.at > 9000) {
         // l'écho ne démarre pas à temps : fondu simple pour ce titre
+        note('écho : ne démarre pas, fondu simple');
         echo.skip = { id: id, since: fade.since };
         echoStop(false);
         return null;
@@ -622,6 +690,7 @@
       if (!(j.locked && now - j.locked >= 250 && st === 1)) {
         // pas encore calé : le lecteur garde son plein volume tant qu'il reste de quoi faire un fondu
         if (left > 1500 + lat && st === 1) return 1;
+        note('écho : pas calé à temps, fondu simple');
         echo.skip = { id: id, since: fade.since };
         echoStop(false);
         return null;
@@ -640,12 +709,13 @@
       if (mainRouted()) { mainGainTo(0, swap); j.swapWait = swap * 1000 + 30; }
       else j.swapWait = swap * 1000 + ctxDelay(echo.route && echo.route.ctx) * 1000;
       j.phase = 'swap'; j.swapAt = now; j.since = fade.since;
+      note('écho : prend la parole (écart ' + Math.round(d * 1000) + ' ms, fondu ' + (j.D / 1000).toFixed(1) + ' s)');
       return j.g0;
     }
 
     // fin du passage : le principal, déjà silencieux, se baisse et passe au titre suivant
     if (j.phase === 'swap') {
-      if (es !== 1 || id !== j.id) { mainGainTo(1, 0.03); echoStop(false); return null; }
+      if (es !== 1 || id !== j.id) { note('écho : passage interrompu (' + (id !== j.id ? 'titre changé' : 'écho état ' + es) + ')'); mainGainTo(1, 0.03); echoStop(false); return null; }
       if (now - j.swapAt < j.swapWait) return j.g0;
       fadeVolume(p, 0);
       fade.g = 0;
@@ -692,14 +762,14 @@
       // temps qu'a mis le nouveau titre à se faire entendre : le prochain fondu partira d'autant plus tôt
       if (!ad) echo.lat = Math.max(0.1, Math.min(2.5, echo.lat / 2 + ((now - j.hand) / 1000 - pos / 1000) / 2));
     }
-    if (echo.speaking && echo.route && !echoRouted() && !echoRoute()) crossRecover(j, now);
+    if (echo.speaking && echo.route && !echoRouted() && !echoRoute()) crossRecover(j, now, 'son débranché');
     // l'écho ne parle que pour l'ancien titre, à une position qui ne recule pas. S'il passe à un
     // autre titre (enchaînement de YouTube, touche multimédia) ou repart en arrière, sa position
     // recommence à zéro : la courbe lui rendait tout son volume, et un autre titre jouait par-dessus
     // celui prévu (« deux musiques distinctes en même temps »). Il se tait aussitôt.
     if (echo.speaking) {
       var ed = ep.getVideoData ? ep.getVideoData() : null, eid = ed && ed.video_id;
-      if ((eid && eid !== j.id) || et < (j.et0 != null ? j.et0 : j.handPos) - 0.5) crossRecover(j, now);
+      if ((eid && eid !== j.id) || et < (j.et0 != null ? j.et0 : j.handPos) - 0.5) crossRecover(j, now, eid && eid !== j.id ? 'autre titre ' + eid : 'recul à ' + et.toFixed(1));
     }
     if (echo.speaking) {
       var x = j.S ? Math.max(0, (et - j.et0) / j.S) : 0;
@@ -707,12 +777,12 @@
         // le compte a mis l'écho en pause : repli durable, mais le titre en cours remonte en courbe
         echo.failed = 'compte';
         store(ECHO_KEY, JSON.stringify({ reason: 'compte', at: now }));
-        crossRecover(j, now);
+        crossRecover(j, now, 'mis en pause par le compte');
       } else if (x >= 0.98) echoHalt();
       // un peu avant la fin du fichier : arrêté avant que YouTube ne fasse quoi que ce soit après
       else if (es === 0 || et >= j.end - 0.3 || (es === 3 && now - (j.stall || (j.stall = now)) > 2000)) {
         // l'écho s'est arrêté avant la fin de sa courbe (fin de fichier, chargement bloqué)
-        crossRecover(j, now);
+        crossRecover(j, now, es === 0 ? 'fini' : es === 3 ? 'chargement bloqué' : 'fin du fichier à ' + et.toFixed(1));
       } else {
         if (es !== 3) j.stall = 0;
         echoSet(j.g0 * riseAt(1 - x));
@@ -723,6 +793,7 @@
       if (j.act === 'next' && st === 1 && now - j.hand > (j.nav ? 5000 : 2500)) {
         // rien après ce titre (fin de la file) : le lecteur reprend la parole là où en est
         // l'écho (ils jouent le même instant) et le fondu simple éteint la fin
+        note('écho : rien après ce titre, le principal reprend');
         fade.g = echo.speaking ? echo.gain : 0;
         fadeVolume(p, fade.g);
         echoStop(false);
@@ -1026,13 +1097,16 @@
   function advance(p) {
     var d = p.getVideoData ? p.getVideoData() : {}, a = auto.list;
     // un titre ajouté à la file passe avant la suite automatique
+    watchMain.asked = Date.now();
     if (a && a.id === d.video_id && !a.used && autoWanted() && !clientAhead()) {
+      note('le pont lance la suite automatique');
       a.used = true;
       var first = a.items[0], w = { videoId: first.videoId, playlistId: a.playlistId };
       if (a.params) w.params = a.params;
       navigate({ watchEndpoint: w }, '/watch?v=' + encodeURIComponent(first.videoId) + '&list=' + encodeURIComponent(a.playlistId));
       return 'auto';
     }
+    note('le pont passe au titre suivant');
     p.nextVideo();
     return 'next';
   }
@@ -1042,7 +1116,7 @@
     try {
       var p = player();
       // note en continu le dernier instant où la musique s'entendait (voir heardState)
-      if (p && p.getPlayerState) { heardState(p); resumeWatch(p); }
+      if (p && p.getPlayerState) { heardState(p); resumeWatch(p); watchMainTick(p); }
       echoWatch();
       if (!p || !p.getPlayerState || !auto.on || adPlaying(p)) return;
       var st = p.getPlayerState(), d = p.getVideoData ? p.getVideoData() : {}, id = d && d.video_id;
@@ -1100,7 +1174,9 @@
       shuffle: shuffleState(),
       repeat: repeatMode(),
       // fondu enchaîné : « ok », ou la raison du repli sur le fondu simple
-      cross: crossStatus()
+      cross: crossStatus(),
+      // journal depuis la dernière lecture de l'état (iBox l'écrit dans logs/music.log)
+      log: journal.length ? journal.splice(0, journal.length) : undefined
     };
   }
   function needPlayer() {
@@ -1126,6 +1202,7 @@
     var d = document.querySelector('ytmusic-you-there-renderer');
     if (d && d.offsetParent !== null) {
       var b = d.querySelector('button, tp-yt-paper-button, yt-button-renderer');
+      note('« Vous écoutez toujours ? » : réponse donnée');
       if (b) b.click();
       setTimeout(function () {
         var p = player();
@@ -1148,6 +1225,7 @@
     if (g.user || now - g.pausedAt < 600 || g.n >= 2) return;
     g.n++;
     g.pausedAt = 0;
+    note('relance du titre suivant, mis en pause tout seul');
     p.playVideo();
   }
 
@@ -1186,13 +1264,13 @@
 
   var COMMANDS = {
     state: function () { return state(); },
-    toggle: function () { var p = needPlayer(); if (p.getPlayerState() === 1) pauseAll(p); else playAll(p); return true; },
-    play: function () { playAll(needPlayer()); return true; },
-    pause: function () { pauseAll(needPlayer()); return true; },
+    toggle: function () { var p = needPlayer(); asked('lecture/pause'); if (p.getPlayerState() === 1) pauseAll(p); else playAll(p); return true; },
+    play: function () { asked('lecture'); playAll(needPlayer()); return true; },
+    pause: function () { asked('pause'); pauseAll(needPlayer()); return true; },
     // au bout de la file, « suivant » passe à la suite automatique (titres proches)
-    next: function () { needPlayer(); fadeThen(function () { advance(needPlayer()); }); return true; },
-    prev: function () { needPlayer(); fadeThen(function () { needPlayer().previousVideo(); }); return true; },
-    seek: function (a) { var p = needPlayer(); crossAbort(); p.seekTo(Number(a && a.seconds) || 0, true); return true; },
+    next: function () { needPlayer(); asked('suivant'); fadeThen(function () { watchMain.asked = Date.now(); advance(needPlayer()); }); return true; },
+    prev: function () { needPlayer(); asked('précédent'); fadeThen(function () { watchMain.asked = Date.now(); needPlayer().previousVideo(); }); return true; },
+    seek: function (a) { var p = needPlayer(); asked('déplacement à ' + (Number(a && a.seconds) || 0).toFixed(1)); crossAbort(); p.seekTo(Number(a && a.seconds) || 0, true); return true; },
     volume: function (a) {
       var p = needPlayer(), v = Math.max(0, Math.min(100, Number(a && a.value) || 0));
       // un choix de l'utilisateur prime sur tout volume « à rendre »
@@ -1338,7 +1416,8 @@
       var item = c && c.items[i], r = item && P.panelVideo(item);
       // la file a changé entre-temps : le titre est lancé seul
       if (!r || r.videoId !== id) return COMMANDS.playItem({ videoId: id });
-      fadeThen(function () { c.svc.selectQueueItem(item); });
+      asked('titre de la file');
+      fadeThen(function () { watchMain.asked = Date.now(); c.svc.selectQueueItem(item); });
       return true;
     },
     // suite automatique : {on} ; rend l'état retenu
@@ -1373,7 +1452,8 @@
       if (a && a.playlistId) { w.playlistId = String(a.playlistId).replace(/^VL/, ''); q.push('list=' + encodeURIComponent(w.playlistId)); }
       if (a && typeof a.index === 'number') { w.index = a.index; q.push('index=' + a.index); }
       if (!q.length) throw new Error('rien-a-lire');
-      fadeThen(function () { navigate({ watchEndpoint: w }, '/watch?' + q.join('&')); });
+      asked('autre titre');
+      fadeThen(function () { watchMain.asked = Date.now(); navigate({ watchEndpoint: w }, '/watch?' + q.join('&')); });
       return true;
     },
     // réponse brute d'InnerTube, pour enregistrer des réponses de test (fixtures)
