@@ -7,7 +7,7 @@
 
   var P = ytmParse;
   var results = {};
-  var VERSION = 13;
+  var VERSION = 14;
   /** Pages lues au plus pour une playlist (environ 100 titres par page). */
   var MAX_PAGES = 10;
 
@@ -16,6 +16,21 @@
     try { return window.ytcfg && window.ytcfg.get ? window.ytcfg.get(k) : undefined; } catch (e) { return undefined; }
   }
   function player() { return document.getElementById('movie_player'); }
+  // Durée du titre (s). Dans iBox (fenêtre cachée), le lecteur annonce parfois une durée fausse :
+  // relevé le 26/11/2026 dans logs/music.log, 256,8 s pour un titre de 237 s, puis pour le suivant
+  // la quantité déjà chargée (39,9, 49,9, 59,9…). Le fondu attendait une fin qui n'arrivait
+  // jamais : le titre s'arrêtait 20 s « trop tôt » et le suivant partait fort, sans fondu. La fiche
+  // du titre (`lengthSeconds`) fait foi ; la durée du lecteur, plus précise, sert quand elles
+  // s'accordent.
+  function trackDuration(pl) {
+    var d = pl && pl.getDuration ? Number(pl.getDuration()) || 0 : 0;
+    try {
+      var r = pl.getPlayerResponse && pl.getPlayerResponse(), v = r && r.videoDetails;
+      var vd = pl.getVideoData ? pl.getVideoData() : null, n = v ? Number(v.lengthSeconds) : 0;
+      if (n > 0 && (!v.videoId || !vd || !vd.video_id || v.videoId === vd.video_id)) return d > 0 && Math.abs(d - n) < 1.5 ? d : n;
+    } catch (e) { /* fiche indisponible */ }
+    return d;
+  }
 
   async function sha1(s) {
     var buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(s));
@@ -236,7 +251,7 @@
   function note(what) {
     var p = player(), d = p && p.getVideoData ? p.getVideoData() : {}, j = echo.job;
     var where = p && p.getPlayerState
-      ? (d.video_id || '-') + ' ' + (p.getCurrentTime() || 0).toFixed(1) + '/' + (p.getDuration() || 0).toFixed(1) + ' état ' + p.getPlayerState()
+      ? (d.video_id || '-') + ' ' + (p.getCurrentTime() || 0).toFixed(1) + '/' + trackDuration(p).toFixed(1) + (Math.abs((p.getDuration() || 0) - trackDuration(p)) > 1.5 ? ' (lecteur ' + (p.getDuration() || 0).toFixed(1) + ')' : '') + ' état ' + p.getPlayerState()
       : 'pas de lecteur';
     journal.push(what + ' | ' + where + (j ? ' | écho ' + j.phase : '') + (adPlaying(p) ? ' | pub' : ''));
     if (journal.length > 80) journal.shift();
@@ -722,7 +737,7 @@
       // le gain revient un peu plus tard : le son déjà en route à plein volume ne doit pas passer
       mainGainTo(1, 0, 0.15);
       j.phase = 'cross'; j.hand = now;
-      j.from = id; j.handPos = ep.getCurrentTime(); j.end = ep.getDuration() || dur / 1000;
+      j.from = id; j.handPos = ep.getCurrentTime(); j.end = trackDuration(ep) || dur / 1000;
       j.inSeen = 0; j.inPos = 0;
       if (j.act === 'again') p.seekTo(0, true); else j.nav = advance(p) === 'auto';
       resumeGuard = { until: now + 20000, n: 0, pausedAt: 0 };
@@ -831,7 +846,7 @@
     // -1 non démarré, 0 fini, 1 lecture, 2 pause, 3 chargement, 5 en file
     var st = p.getPlayerState(), data = p.getVideoData ? p.getVideoData() : {};
     var id = (data && data.video_id) || null;
-    var pos = (p.getCurrentTime ? p.getCurrentTime() : 0) * 1000 || 0, dur = (p.getDuration ? p.getDuration() : 0) * 1000 || 0;
+    var pos = (p.getCurrentTime ? p.getCurrentTime() : 0) * 1000 || 0, dur = trackDuration(p) * 1000 || 0;
     var target = 1, near = false;
     fade.fast = false;
     var crossG = crossStep(p, st, id, pos, dur, now);
@@ -1166,7 +1181,7 @@
       album: (m && m.album) || null,
       artwork: art,
       position: p && p.getCurrentTime ? p.getCurrentTime() : 0,
-      duration: p && p.getDuration ? p.getDuration() : 0,
+      duration: p && p.getDuration ? trackDuration(p) : 0,
       // pendant un fondu : le volume choisi par l'utilisateur, pas celui de la rampe
       volume: fade.user != null ? fade.user : fade.lost != null ? fade.lost : p && p.getVolume ? p.getVolume() : null,
       muted: p && p.isMuted ? p.isMuted() : null,

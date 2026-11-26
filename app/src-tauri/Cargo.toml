@@ -1,6 +1,6 @@
 [package]
 name = "music-in-the-box"
-version = "1.1.10"
+version = "1.1.11"
 description = "Music in the Box : YouTube Music ou votre lecteur, par-dessus vos jeux"
 authors = ["atzski"]
 license = "MIT"
