@@ -29,8 +29,9 @@ run("gh", ["release", "create", `v${version}`, file, "--repo", repo, "--title", 
 
 const catalog = join(root, "..", "ibox", "services", "inetbox", "src", "plugins.ts");
 const src = readFileSync(catalog, "utf8");
-const m = src.match(/export const PLUGINS: PluginEntry\[\] = (\[[\s\S]*?\]);\n/);
+// fin de ligne LF ou CRLF (la copie de travail Windows d'iBox peut être en CRLF)
+const m = src.match(/export const PLUGINS: PluginEntry\[\] = (\[[\s\S]*?\]);(\r?\n)/);
 if (!m) throw new Error("PLUGINS introuvable dans plugins.ts");
 const list = JSON.parse(m[1]).filter((e) => e.id !== id).concat(entry);
-writeFileSync(catalog, src.replace(m[0], `export const PLUGINS: PluginEntry[] = ${JSON.stringify(list, null, 2)};\n`));
+writeFileSync(catalog, src.replace(m[0], `export const PLUGINS: PluginEntry[] = ${JSON.stringify(list, null, 2).replace(/\n/g, m[2])};${m[2]}`));
 console.log(`Release ${repo} v${version} publiée ; catalogue iNetbox mis à jour (à déployer).`);
