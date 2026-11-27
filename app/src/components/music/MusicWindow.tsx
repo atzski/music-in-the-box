@@ -1,5 +1,5 @@
 import { EASE as EASES, SPRING, TWEEN } from "@/motion/tokens";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import { animate, AnimatePresence, motion, useAnimationFrame, useMotionValue, useSpring, useTransform } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -154,7 +154,7 @@ export function MusicWindow() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[] | null>(cachedPlaylists);
   const [listsError, setListsError] = useState<string | null>(null);
-  const [detail, setDetail] = useState<{ list: Playlist; tracks: Track[] | null } | null>(null);
+  const [detail, setDetail] = useState<ListView | null>(null);
   const [search, setSearch] = useState<SearchState>({ query: "", kind: "songs", songs: null, videos: null, artists: null, albums: null, loading: false });
   const [artist, setArtist] = useState<ArtistView | null>(null);
   const [album, setAlbum] = useState<AlbumView | null>(null);
@@ -177,6 +177,17 @@ export function MusicWindow() {
   const [dir, setDir] = useState<1 | -1>(1);
   const busy = useRef(false);
   const card = useRef<HTMLElement>(null);
+  // historique du panneau : chaque fiche ouverte (playlist, artiste, album) retient l'écran d'où
+  // l'on vient, avec son défilement et l'élément choisi ; Retour (bouton, B, Échap) y revient d'un
+  // cran. Changer d'onglet ou lancer un titre repart de zéro.
+  const history = useRef<Snapshot[]>([]);
+  const here = useRef<Screen>({ view, detail, artist, album });
+  useLayoutEffect(() => {
+    here.current = { view, detail, artist, album };
+  });
+  /** Écran rendu par Retour : son défilement et sa sélection sont remis une fois affiché. */
+  const restoring = useRef<Snapshot | null>(null);
+  const contentBox = useRef<HTMLDivElement>(null);
   const position = useSettings((s) => s.musicPosition ?? DEFAULT_POSITION);
   const setSetting = useSettings((s) => s.set);
   const stayOpen = useSettings((s) => s.musicStayOpen === true);
@@ -212,6 +223,7 @@ export function MusicWindow() {
       listen("music://open", () => {
         setError(null);
         setView("mini");
+        history.current = [];
         setDetail(null);
         setArtist(null);
         // sans cela, la fiche d'album quittée à la fermeture revenait à la place de la recherche
@@ -374,57 +386,82 @@ export function MusicWindow() {
       setDir(ORDER.indexOf(v) >= ORDER.indexOf(from) ? 1 : -1);
       return v;
     });
+    history.current = [];
     setDetail(null);
     setArtist(null);
     setAlbum(null);
   }, []);
 
+  /** Garde l'écran affiché dans l'historique, juste avant d'ouvrir une fiche par-dessus. */
+  const remember = useCallback(() => {
+    const at = here.current;
+    const key = screenKey(at);
+    const pane = at.view === "mini" ? null : contentBox.current?.querySelector<HTMLElement>(`[data-content="${CSS.escape(key)}"]`);
+    const items = pane ? input.focusables().filter((e) => pane.contains(e)) : [];
+    // nom d'artiste dans une ligne : c'est la ligne qu'on retrouvera sélectionnée
+    const row = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-focusable]:not([data-nav-inner])") ?? null;
+    const scroll = pane?.querySelector<HTMLElement>("[data-music-scroll]")?.scrollTop ?? 0;
+    history.current = [...history.current.slice(-(HISTORY_MAX - 1)), { ...at, key, scroll, focus: row ? items.indexOf(row) : -1 }];
+  }, []);
+
+  /** Un cran en arrière : l'écran précédent, sinon le mini-lecteur. Faux s'il n'y a plus rien. */
+  const stepBack = useCallback((): boolean => {
+    const prev = history.current.pop();
+    if (prev) {
+      setDir(-1);
+      restoring.current = prev;
+      setView(prev.view);
+      setDetail(prev.detail);
+      setArtist(prev.artist);
+      setAlbum(prev.album);
+      return true;
+    }
+    if (here.current.view !== "mini") {
+      go("mini");
+      return true;
+    }
+    return false;
+  }, [go]);
+
+  /** Écran revenu : même défilement, même élément sélectionné (dès que son contenu est affiché). */
+  const restore = useCallback((at: Snapshot, tries = 40) => {
+    const pane = at.view === "mini" ? null : contentBox.current?.querySelector<HTMLElement>(`[data-content="${CSS.escape(at.key)}"]`);
+    if (at.view !== "mini" && !pane) {
+      if (tries > 0) requestAnimationFrame(() => restore(at, tries - 1));
+      else input.focusInitial();
+      return;
+    }
+    const scroller = pane?.querySelector<HTMLElement>("[data-music-scroll]");
+    if (scroller) scroller.scrollTop = at.scroll;
+    const el = pane && at.focus >= 0 ? input.focusables().filter((e) => pane.contains(e))[at.focus] : undefined;
+    if (el) input.focus(el, { instant: true });
+    else input.focusInitial();
+  }, []);
+
   // focus initial de chaque vue (anneau d'iBox), une fois la vue affichée
   useEffect(() => {
     if (!open) return;
-    const t = window.setTimeout(() => input.focusInitial(), 260);
+    const t = window.setTimeout(() => {
+      const back = restoring.current;
+      restoring.current = null;
+      if (back) restore(back);
+      else input.focusInitial();
+    }, 260);
     return () => window.clearTimeout(t);
     // les paroles arrivent après la vue : le focus se pose sur elles dès qu'elles sont là ;
     // de même quand le lecteur laisse la place au démarrage rapide (plus rien ne joue), ou l'inverse
-  }, [view, compact, detail?.list.id, artist?.id, album?.id, open, lyricsReady, hasTrack]);
+  }, [view, compact, detail?.list.id, artist?.id, album?.id, open, lyricsReady, hasTrack, restore]);
 
-  // Retour : fiche → liste → mini-lecteur → fermeture (ou retour au jeu)
+  // Retour : écran précédent (historique) → mini-lecteur → fermeture (ou retour au jeu)
   useEffect(
     () =>
       input.onBack(() => {
-        if (album) {
-          setDir(-1);
-          setAlbum(null);
-          return true;
-        }
-        if (artist) {
-          // d'un artiste proche, on revient à celui d'où l'on venait ; d'un nom cliqué ailleurs,
-          // à la vue où il était
-          setDir(-1);
-          if (artist.back) setArtist(artist.back);
-          else {
-            setArtist(null);
-            if (artist.ret) {
-              setView(artist.ret.view);
-              setAlbum(artist.ret.album);
-            }
-          }
-          return true;
-        }
-        if (detail) {
-          setDir(-1);
-          setDetail(null);
-          return true;
-        }
-        if (view !== "mini") {
-          go("mini");
-          return true;
-        }
+        if (stepBack()) return true;
         if (stayOpen) release();
         else close();
         return "quiet";
       }),
-    [album, artist, close, detail, go, release, stayOpen, view],
+    [close, release, stayOpen, stepBack],
   );
   const act = useCallback(async (action: MusicAction, value?: number) => {
     if (busy.current && action !== "volume") return;
@@ -469,6 +506,7 @@ export function MusicWindow() {
         setLaunches(readLaunches());
       }
       // retour au mini-lecteur : le titre lancé s'y affiche
+      history.current = [];
       setDir(-1);
       setView("mini");
       setDetail(null);
@@ -485,6 +523,7 @@ export function MusicWindow() {
     setError(null);
     try {
       await music.queuePlay(q);
+      history.current = [];
       setDir(-1);
       setView("mini");
       window.setTimeout(() => void music.state().then(setState).catch(() => undefined), 1200);
@@ -494,17 +533,22 @@ export function MusicWindow() {
   }, []);
 
   const openList = useCallback((list: Playlist) => {
+    remember();
     setDir(1);
     // déjà ouverte : affichée tout de suite, puis relue (titres aimés ou retirés entre-temps)
     setDetail({ list, tracks: cachedTracks.get(list.id) ?? null });
     const show = (tracks: Track[]) => setDetail((d) => (d?.list.id === list.id ? { list, tracks } : d));
     fetchTracks(list.id, show).catch(() => setDetail((d) => (d?.list.id === list.id ? { list, tracks: d.tracks ?? [] } : d)));
-  }, []);
+  }, [remember]);
 
-  /** ``fromArtist`` : ouvert depuis la fiche d'un autre artiste (Retour y ramène). */
-  const openArtist = useCallback((a: Artist, fromArtist = false, ret: ArtistView["ret"] = null) => {
+  /** Fiche d'artiste ; Retour ramène à l'écran d'où on l'a ouverte. */
+  const openArtist = useCallback((a: Artist) => {
+    const at = here.current;
+    // déjà affichée : rien à empiler
+    if (at.view === "search" && at.artist?.id === a.id && !at.album) return;
+    remember();
     setDir(1);
-    setArtist((prev) => ({ id: a.id, preview: a, page: null, songs: null, back: fromArtist ? prev : null, ret: fromArtist ? (prev?.ret ?? null) : ret }));
+    setArtist({ id: a.id, preview: a, page: null, songs: null });
     const mine = (x: ArtistView | null) => x?.id === a.id;
     music
       .artist(a.id)
@@ -516,16 +560,17 @@ export function MusicWindow() {
         }
       })
       .catch(() => setArtist((x) => (mine(x) ? { ...x!, page: { name: a.name, thumbnail: a.thumbnail, tracks: [] } } : x)));
-  }, []);
+  }, [remember]);
 
   const openAlbum = useCallback((a: Album) => {
+    remember();
     setDir(1);
     setAlbum({ id: a.id, preview: a, page: null });
     music
       .album(a.id)
       .then((page) => setAlbum((x) => (x?.id === a.id ? { ...x, page } : x)))
       .catch(() => setAlbum((x) => (x?.id === a.id ? { ...x, page: { title: a.title, artist: a.artist, year: a.year, thumbnail: a.thumbnail, playlistId: null, tracks: [] } } : x)));
-  }, []);
+  }, [remember]);
 
   // recherche pendant la frappe, après une courte pause ; titres, artistes et albums en parallèle
   const searchSeq = useRef(0);
@@ -671,13 +716,12 @@ export function MusicWindow() {
   const showArtist = useCallback(
     (a: ArtistRef) => {
       if (!a.id) return;
-      const onArtistPage = view === "search" && !!artist && !album;
       if (compactSetting) setSetting("musicCompact", false);
+      openArtist({ id: a.id, name: a.name, subtitle: "", thumbnail: null });
       setAlbum(null);
       setView("search");
-      openArtist({ id: a.id, name: a.name, subtitle: "", thumbnail: null }, onArtistPage, onArtistPage ? null : { view, album });
     },
-    [album, artist, compactSetting, openArtist, setSetting, view],
+    [compactSetting, openArtist, setSetting],
   );
   // artistes du titre en cours : ceux que la file donne pour lui (YouTube Music seulement)
   const nowArtists = useMemo(() => (youtube && n ? queue.find((q) => q.videoId === n.id)?.artists : undefined), [queue, youtube, n?.id]);
@@ -699,7 +743,7 @@ export function MusicWindow() {
   }, []);
 
   // clé et sens du contenu (pour des fondus orientés)
-  const contentKey = view === "mini" ? (compact ? "compact" : "mini") : view === "search" && album ? `album-${album.id}` : view === "search" && artist ? `artist-${artist.id}` : view === "lists" && detail ? `list-${detail.list.id}` : view;
+  const contentKey = view === "mini" ? (compact ? "compact" : "mini") : screenKey({ view, detail, artist, album });
 
   return (
     <ArtistOpen.Provider value={state?.youtube ? showArtist : null}>
@@ -755,7 +799,7 @@ export function MusicWindow() {
                     <div className="-mx-5 -mt-5 cursor-grab px-5 pt-2.5 pb-1 active:cursor-grabbing" onPointerDown={startMove} title="Déplacer">
                       <Grip />
                       <div className="flex items-center gap-2">
-                        <RoundButton icon="back" label="Revenir au lecteur" onClick={() => go("mini")} />
+                        <RoundButton icon="back" label={history.current.length ? "Retour" : "Revenir au lecteur"} onClick={() => void stepBack()} />
                         <div className="flex flex-1 justify-center">
                           <IconTabs value={view as Tab} onChange={(v) => go(v)} />
                         </div>
@@ -763,9 +807,9 @@ export function MusicWindow() {
                       </div>
                     </div>
                     {n && <NowBar n={n} live={live} onToggle={() => void act("toggle")} />}
-                    <div className="relative mt-4 flex min-h-0 flex-1 flex-col">
+                    <div ref={contentBox} className="relative mt-4 flex min-h-0 flex-1 flex-col">
                       <AnimatePresence mode="wait" initial={false} custom={dir}>
-                        <Fade key={contentKey} dir={dir} fill>
+                        <Fade key={contentKey} name={contentKey} dir={dir} fill>
                           {view === "queue" ? (
                             <QueueList
                               items={upNext(queue, 50)}
@@ -792,7 +836,7 @@ export function MusicWindow() {
                                 onRadio={(t) => void play({ videoId: t.videoId, playlistId: radioOf(t.videoId) })}
                                 onCard={(c) => {
                                   if (c.kind === "album") openAlbum(cardAlbum(c));
-                                  else if (c.kind === "artist") openArtist({ id: c.id, name: c.title, subtitle: c.subtitle, thumbnail: c.thumbnail }, true);
+                                  else if (c.kind === "artist") openArtist({ id: c.id, name: c.title, subtitle: c.subtitle, thumbnail: c.thumbnail });
                                   else if (c.kind === "playlist" && c.playlistId) void play({ playlistId: c.playlistId });
                                   else if (c.kind === "video") void play({ videoId: c.id });
                                 }}
@@ -987,9 +1031,9 @@ const fadeVariants = {
   exit: (d: 1 | -1) => (reduced() ? { opacity: 0, transition: { duration: 0.1 } } : { opacity: 0, x: -14 * d, scale: 0.99, filter: "blur(3px)", transition: { duration: 0.16, ease: EASE } }),
 };
 
-function Fade({ children, fill, dir }: { children: ReactNode; fill?: boolean; dir: 1 | -1 }) {
+function Fade({ children, fill, dir, name }: { children: ReactNode; fill?: boolean; dir: 1 | -1; name?: string }) {
   return (
-    <motion.div custom={dir} variants={fadeVariants} initial="enter" animate="center" exit="exit" className={`relative ${fill ? "flex h-full min-h-0 flex-1 flex-col" : ""}`}>
+    <motion.div data-content={name} custom={dir} variants={fadeVariants} initial="enter" animate="center" exit="exit" className={`relative ${fill ? "flex h-full min-h-0 flex-1 flex-col" : ""}`}>
       {children}
     </motion.div>
   );
@@ -1153,7 +1197,7 @@ function rise(index: number) {
 
 /** Zone qui défile ; la marge intérieure laisse la place à l'anneau de focus d'iBox. */
 function Scroll({ children }: { children: ReactNode }) {
-  return <div className="-mx-2 min-h-0 flex-1 overflow-y-auto px-2 py-2 [scrollbar-width:none]">{children}</div>;
+  return <div data-music-scroll className="-mx-2 min-h-0 flex-1 overflow-y-auto px-2 py-2 [scrollbar-width:none]">{children}</div>;
 }
 
 function Header({ app, playing, onClose, onMove, onCompact }: { app: string | null; playing: boolean; onClose: () => void; onMove: (e: ReactPointerEvent<HTMLElement>) => void; onCompact: () => void }) {
@@ -1991,12 +2035,24 @@ type ArtistView = {
   preview: Artist;
   page: ArtistPage | null;
   songs: Track[] | null;
-  /** Artiste d'où l'on vient (artiste proche) ; Retour y ramène. */
-  back: ArtistView | null;
-  /** Vue d'où la fiche a été ouverte (nom d'artiste cliqué ailleurs) ; Retour y ramène. */
-  ret: { view: View; album: AlbumView | null } | null;
 };
 type AlbumView = { id: string; preview: Album; page: AlbumPage | null };
+type ListView = { list: Playlist; tracks: Track[] | null };
+
+/** Ce qu'affiche le panneau : vue, et la fiche ouverte par-dessus s'il y en a une. */
+type Screen = { view: View; detail: ListView | null; artist: ArtistView | null; album: AlbumView | null };
+/** Écran gardé dans l'historique : `key` (son contenu), défilement et rang de l'élément choisi. */
+type Snapshot = Screen & { key: string; scroll: number; focus: number };
+/** Crans de Retour gardés au plus. */
+const HISTORY_MAX = 30;
+
+/** Clé du contenu affiché (fondus, historique). */
+function screenKey({ view, detail, artist, album }: Screen): string {
+  if (view === "search" && album) return `album-${album.id}`;
+  if (view === "search" && artist) return `artist-${artist.id}`;
+  if (view === "lists" && detail) return `list-${detail.list.id}`;
+  return view;
+}
 
 /** Titres montrés avant « Voir tous les titres ». */
 const ARTIST_TOP = 10;
