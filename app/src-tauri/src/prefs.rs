@@ -14,6 +14,33 @@ pub struct Prefs {
     pub music_keys: Option<String>,
     /// Écran du lecteur (nom Windows) ; absent : l'écran principal.
     pub music_monitor: Option<String>,
+    /// Langue de l'interface (« fr », « en ») ; absente : celle de Windows.
+    pub lang: Option<String>,
+}
+
+/// Langue de Windows : le français s'il est français, l'anglais sinon (langue par défaut).
+#[cfg(windows)]
+fn windows_lang() -> &'static str {
+    use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
+    // identifiant de langue primaire : 0x0C = français
+    if unsafe { GetUserDefaultUILanguage() } & 0x3FF == 0x0C { "fr" } else { "en" }
+}
+#[cfg(not(windows))]
+fn windows_lang() -> &'static str {
+    "en"
+}
+
+/// Langue de l'interface : le choix des réglages, sinon celle de Windows.
+pub fn lang_of(choice: Option<&str>) -> &'static str {
+    match choice {
+        Some("fr") => "fr",
+        Some("en") => "en",
+        _ => windows_lang(),
+    }
+}
+
+pub fn lang(app: &AppHandle) -> &'static str {
+    lang_of(load(app).lang.as_deref())
 }
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -50,5 +77,14 @@ mod tests {
         assert_eq!(p.music_keys.as_deref(), Some("Ctrl+F9"));
         assert!(p.music_monitor.is_none());
         assert!(serde_json::from_str::<Prefs>("{}").unwrap().music_keys.is_none());
+        assert!(serde_json::from_str::<Prefs>("{}").unwrap().lang.is_none());
+    }
+
+    #[test]
+    fn a_chosen_language_wins_over_windows() {
+        assert_eq!(super::lang_of(Some("fr")), "fr");
+        assert_eq!(super::lang_of(Some("en")), "en");
+        assert!(matches!(super::lang_of(None), "fr" | "en"));
+        assert!(matches!(super::lang_of(Some("de")), "fr" | "en"));
     }
 }

@@ -8,6 +8,14 @@ import { isTauri } from "@/services/native";
 import { useSettings } from "@/services/settings";
 import { DEFAULT_KEYS, applyShortcuts } from "@/services/shortcuts";
 import { input } from "@/input/InputController";
+import { appLang, setAppLang, type AppLang } from "@/services/lang";
+import type { Lang } from "@/i18n";
+
+const LANGS: { value: Lang | null; label: string }[] = [
+  { value: null, label: "Comme Windows" },
+  { value: "fr", label: "Français" },
+  { value: "en", label: "English" },
+];
 
 /**
  * Fenêtre de réglages de l'app autonome, ouverte depuis la zone de notification :
@@ -20,6 +28,8 @@ export function SettingsWindow() {
   const set = useSettings((s) => s.set);
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [version, setVersion] = useState("");
+  const [lang, setLang] = useState<AppLang | null>(null);
+  useEffect(() => void appLang().then(setLang), []);
 
   useEffect(() => input.attachKeyboard(), []);
   useEffect(() => void applyShortcuts(keys), [keys]);
@@ -41,7 +51,7 @@ export function SettingsWindow() {
         <div className="min-w-0 flex-1">
           <h1 className="font-display text-[1.7rem] leading-tight text-ink">Music in the Box</h1>
           <p className="text-[0.9rem] font-semibold text-ink-soft">
-            YouTube Music ou votre lecteur, par-dessus vos jeux. {version && <span>Version {version}</span>}
+            YouTube Music par-dessus vos jeux. {version && <span>{`Version ${version}`}</span>}
           </p>
         </div>
         <Button variant="primary" icon="play" onClick={() => void invoke("music_open").catch(() => undefined)}>
@@ -52,6 +62,16 @@ export function SettingsWindow() {
       <Group title="Application" icon="gear">
         <Row label="Lancer avec Windows" note="L’app démarre discrètement dans la zone de notification, prête pour Alt+C.">
           <Toggle checked={autostart === true} onChange={toggleAutostart} label="Lancer avec Windows" />
+        </Row>
+        <Row label="Langue" note="Changer de langue recharge le lecteur et cette fenêtre.">
+          <div className="flex flex-wrap items-center gap-2">
+            {LANGS.map((o) => (
+              <Button key={o.label} variant={lang && lang.choice === o.value ? "primary" : "soft"} onClick={() => void setAppLang(o.value)}>
+                {/* les noms des langues s'écrivent dans leur propre langue */}
+                {o.value ? <span data-no-i18n>{o.label}</span> : o.label}
+              </Button>
+            ))}
+          </div>
         </Row>
         <Row label="Sons de l’interface" note="Petits sons quand on navigue dans le lecteur.">
           <Toggle checked={sounds} onChange={(v) => set("soundEnabled", v)} label="Sons de l’interface" />

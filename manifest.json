@@ -1,9 +1,12 @@
 {
   "id": "music-in-the-box",
   "name": "Music in the Box",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "author": { "name": "atzski", "username": "atzski" },
-  "description": "Contrôlez YouTube Music ou votre lecteur par-dessus vos parties.",
+  "description": "Control YouTube Music on top of your games: playlists, search, lyrics, radio and crossfades, from the keyboard or a controller.",
+  "i18n": {
+    "fr": { "description": "Pilotez YouTube Music par-dessus vos parties : playlists, recherche, paroles, radio et fondus enchaînés, au clavier ou à la manette." }
+  },
   "ibox": ">=1.0.5",
   "platforms": ["windows"],
   "permissions": ["overlay", "hotkey", "gamepad", "media-session", "backdrop", "webview:https://music.youtube.com"],

@@ -3,7 +3,7 @@
 //   2. Release GitHub v<version> sur atzski/music-in-the-box avec le paquet ;
 //   3. entrée du catalogue écrite dans ../ibox/services/inetbox/src/plugins.ts.
 // Ensuite : déployer iNetbox selon sa procédure habituelle (copie vers atzski/inetbox-server, push).
-//   NOTES="…" node scripts/release.mjs [--dry-run]
+//   NOTES="… (anglais)" NOTES_FR="… (français)" node scripts/release.mjs [--dry-run]
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, stdio: "inherit"
 const { id, version, name } = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
 const repo = `atzski/${id}`;
 if (!process.env.NOTES) throw new Error("NOTES requis (notes de version affichées dans iBox).");
+if (!process.env.NOTES_FR) throw new Error("NOTES_FR requis : NOTES en anglais (langue par défaut), NOTES_FR en français.");
 
 run("npm", ["test"]);
 run("node", ["scripts/pack.mjs"]);

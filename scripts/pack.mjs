@@ -40,6 +40,22 @@ const entry = {
   url: local ? `${id}-${version}.iboxplugin` : `https://github.com/atzski/${id}/releases/download/v${version}/${id}-${version}.iboxplugin`,
   sha256, signature, publisher: "atzski", size: statSync(out).size,
   notes: process.env.NOTES ?? "", permissions: manifest.permissions, icon, ibox: manifest.ibox, platforms: manifest.platforms,
+  ...translations(manifest),
 };
 writeFileSync(join(root, "dist", "catalog-entry.json"), JSON.stringify(entry, null, 2));
 console.log(`${out}\nsha256 ${sha256}\nentrée de catalogue : dist/catalog-entry.json`);
+
+/**
+ * Textes du catalogue dans d'autres langues : `name` et `description` sont en anglais (langue
+ * par défaut des plugins), `i18n` du manifeste les donne en français ; les notes françaises
+ * viennent de NOTES_FR. iBox prend `i18n[langue]`, puis `i18n.en`, puis la base.
+ */
+function translations(m) {
+  const i18n = {};
+  for (const [lang, t] of Object.entries(m.i18n ?? {})) {
+    const texts = Object.fromEntries(["name", "description"].filter((k) => t[k]).map((k) => [k, t[k]]));
+    if (Object.keys(texts).length) i18n[lang] = texts;
+  }
+  if (process.env.NOTES_FR) i18n.fr = { ...i18n.fr, notes: process.env.NOTES_FR };
+  return Object.keys(i18n).length ? { i18n } : {};
+}

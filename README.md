@@ -73,7 +73,9 @@ Don't use iBox? Music in the Box also exists as a small Windows app of its own: 
 
 1. Download `Music.in.the.Box_<version>_x64-setup.exe` from the [latest release](https://github.com/atzski/music-in-the-box/releases/latest) and run it (no administrator rights needed).
 2. The app waits in the notification area. **Alt+C**, or **View + Y** held on a controller, opens the panel over your game; the same again closes it.
-3. Click the tray icon for the settings: shortcut, where the panel sits on screen, staying visible while you play, YouTube Music sign-in, start with Windows.
+3. Click the tray icon for the settings: shortcut, where the panel sits on screen, staying visible while you play, YouTube Music sign-in, start with Windows, language.
+
+The app speaks English, or French when Windows is in French; Settings › Language changes it. In iBox, the plugin follows the language of iBox.
 
 If iBox runs with the plugin at the same time, both want Alt+C: pick another shortcut in one of them.
 

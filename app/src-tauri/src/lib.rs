@@ -63,11 +63,49 @@ async fn app_quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Textes du menu de la zone de notification : (ouvrir le lecteur, réglages, quitter).
+fn tray_texts(lang: &str) -> [&'static str; 3] {
+    if lang == "fr" {
+        ["Ouvrir le lecteur", "Réglages", "Quitter"]
+    } else {
+        ["Open the player", "Settings", "Quit"]
+    }
+}
+
+/// Entrées du menu, gardées pour suivre un changement de langue.
+struct TrayItems([MenuItem<tauri::Wry>; 3]);
+
+/// `{ choice, lang }` : langue choisie dans les réglages (null : celle de Windows) et langue en usage.
+#[tauri::command]
+async fn app_lang_get(app: AppHandle) -> serde_json::Value {
+    serde_json::json!({ "choice": prefs::load(&app).lang, "lang": prefs::lang(&app) })
+}
+
+/// Change la langue (null : celle de Windows) : menu traduit, fenêtres ouvertes rechargées.
+#[tauri::command]
+async fn app_lang_set(app: AppHandle, lang: Option<String>) {
+    let lang = lang.filter(|l| matches!(l.as_str(), "fr" | "en"));
+    prefs::update(&app, |p| p.lang = lang);
+    if let Some(items) = app.try_state::<TrayItems>() {
+        for (item, text) in items.0.iter().zip(tray_texts(prefs::lang(&app))) {
+            let _ = item.set_text(text);
+        }
+    }
+    // seulement l'interface : la fenêtre cachée de YouTube Music garde sa lecture
+    for label in ["main", "music"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.eval("location.reload()");
+        }
+    }
+}
+
 fn tray(app: &AppHandle) -> tauri::Result<()> {
-    let player = MenuItem::with_id(app, "player", "Ouvrir le lecteur", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Réglages", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?;
+    let [open, gear, leave] = tray_texts(prefs::lang(app));
+    let player = MenuItem::with_id(app, "player", open, true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", gear, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", leave, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&player, &settings, &PredefinedMenuItem::separator(app)?, &quit])?;
+    app.manage(TrayItems([player.clone(), settings.clone(), quit.clone()]));
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("Music in the Box (Alt+C)")
         .menu(&menu)
@@ -131,6 +169,8 @@ pub fn run() {
             autostart_get,
             autostart_set,
             app_quit,
+            app_lang_get,
+            app_lang_set,
         ])
         .build(tauri::generate_context!())
         .expect("Music in the Box n'a pas pu démarrer");
